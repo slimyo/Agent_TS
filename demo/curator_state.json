@@ -1,0 +1,26 @@
+{
+  "Q": {
+    "n": 365,
+    "missing_count": 4,
+    "missing_ratio": 0.011,
+    "mean": 19.1011,
+    "std": 5.8802,
+    "min": 3.3765,
+    "max": 43.818,
+    "trend_slope": 0.049123,
+    "outlier_count_iqr": 1
+  },
+  "V_path": "/home/hz/code/agent_ts/demo/curator_panel.png",
+  "A": {
+    "trend": "increasing",
+    "seasonality": "yes",
+    "seasonal_period": 7,
+    "stationarity": "non_stationary",
+    "reason": "子图B显示趋势分量持续上升，子图C显示季节性分量有明显的周期性波动（周期约为7），子图A的滚动均值也表明序列存在上升趋势，因此序列是非平稳的。"
+  },
+  "strategy_pi": {
+    "missing_strategy": "linear_interpolation",
+    "outlier_strategy": "clip_iqr",
+    "reason": "缺失值比例极低（1.1%），使用线性插值填补可保留趋势；仅检测到1个异常值，使用IQR截断处理以修正极端值。"
+  }
+}

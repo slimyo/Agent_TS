@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda --version)",
+      "Bash(mamba --version)",
+      "WebFetch(domain:docs.bigmodel.cn)"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "executive_summary": "基于包含 365 个时间点的数据集，本项目采用了 Holt-Winters 与 ARIMA 模型进行预测。最终集成测试的均方绝对百分比误差（MAPE）为 2.1592。",
+  "data_insight": "数据集包含 365 个时间点，缺失率仅为 1.1%，通过线性插值处理。序列呈现明显的上升趋势（斜率 0.049123）和季节性波动，周期约为 7。",
+  "model_selection_rationale": "鉴于序列具有明显的上升趋势（trend_slope: 0.049123）和季节性（seasonality: yes），Holt-Winters 被选中，其验证集 MAPE 为 2.5727。ARIMA 因序列非平稳而被考虑，验证集 MAPE 为 3.9032。",
+  "ensemble_decision_rationale": "采用单模型策略，因为 Holt-Winters（2.5727）与 ARIMA（3.9032）的差距为 51.65%，超过 30%。因此，Holt-Winters 权重设为 1.0，ARIMA 权重设为 0.0。",
+  "limitations": "训练数据来源为合成数据，可能无法完全反映真实业务场景的分布特征。项目未对测试集进行严格的分布偏移检验，且 Curator 诊断结果缺乏置信度。模型库的选择和参数设置均为手工固定，未进行自动化超参数搜索，这限制了模型性能的进一步提升。"
+}

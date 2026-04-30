@@ -1,0 +1,98 @@
+{
+  "task": {
+    "horizon_test": 14,
+    "horizon_val": 14,
+    "period": 7,
+    "n_train": 337,
+    "n_val": 14,
+    "n_test": 14
+  },
+  "candidates": [
+    {
+      "model": "holt_winters",
+      "best_params": {
+        "trend": "add",
+        "damped_trend": false
+      },
+      "val_mape": 2.5727,
+      "reason": "序列具有明显的上升趋势（trend_slope: 0.049123）和季节性（seasonality: yes），Holt-Winters 显式建模水平、趋势和季节性，非常适合。",
+      "all_trials": [
+        [
+          {
+            "trend": "add",
+            "damped_trend": false
+          },
+          2.5727
+        ],
+        [
+          {
+            "trend": "add",
+            "damped_trend": true
+          },
+          2.8617
+        ],
+        [
+          {
+            "trend": null,
+            "damped_trend": false
+          },
+          3.021
+        ]
+      ]
+    },
+    {
+      "model": "arima",
+      "best_params": {
+        "order": [
+          2,
+          1,
+          2
+        ]
+      },
+      "val_mape": 3.9032,
+      "reason": "序列是非平稳的（stationarity: non_stationary），ARIMA 通过差分处理趋势，适合此类序列。",
+      "all_trials": [
+        [
+          {
+            "order": [
+              1,
+              1,
+              1
+            ]
+          },
+          5.9854
+        ],
+        [
+          {
+            "order": [
+              2,
+              1,
+              1
+            ]
+          },
+          5.571
+        ],
+        [
+          {
+            "order": [
+              1,
+              1,
+              2
+            ]
+          },
+          5.8838
+        ],
+        [
+          {
+            "order": [
+              2,
+              1,
+              2
+            ]
+          },
+          3.9032
+        ]
+      ]
+    }
+  ]
+}
