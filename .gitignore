@@ -1,0 +1,6 @@
+
+# research artifacts
+research/datasets/raw/
+research/results/
+__pycache__/
+*.pyc
