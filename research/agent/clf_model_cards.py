@@ -189,6 +189,78 @@ CLF_MODEL_CARDS: dict[str, dict] = {
         "cost_level": "high",                # 每 query 1 LLM call
         "preprocessing_requirements": ["compact text summary"],
     },
+    # === Round 2 (task #69) library expansion: sktime-backed alternatives ===
+    "minirocket": {
+        "class": "MiniRocket (Dempster 2021) — deterministic kernels variant of Rocket",
+        "assumes": [
+            "fixed set of 10,000 minimal binary kernels",
+            "linear classifier on PPV-transformed features",
+            "z-normalization per series",
+        ],
+        "strengths": [
+            "complementary to Rocket on image-outline / shape data",
+            "BeetleFly N=5 +20pp over Rocket (smoke test)",
+            "deterministic — no random seed sensitivity",
+        ],
+        "weaknesses": [
+            "slower fit than Rocket (~6s vs 1s at N=5)",
+            "occasional Wafer-style industrial regression vs Rocket",
+        ],
+        "typical_failure": "smooth-persistent industrial signals where Euclid 1-NN dominates",
+        "ucr_evidence": "BeetleFly N=5: 95% vs Rocket 75% (+20pp); Wafer N=5: 73.5% vs Rocket 81.5% (-8pp)",
+        "min_samples_per_class": 2,
+        "multiclass_support": True,
+        "max_sequence_length": 10000,
+        "cost_level": "medium",
+        "preprocessing_requirements": ["z-normalization per series"],
+    },
+    "weasel": {
+        "class": "WEASEL (Schäfer 2017) — dictionary-based symbolic representation classifier",
+        "assumes": [
+            "recurring discrete motifs encode class identity",
+            "SFA word histograms discriminative",
+            "logistic regression on bag-of-words",
+        ],
+        "strengths": [
+            "Wafer industrial fault N=5: 87% vs Rocket 81.5% (+5.5pp)",
+            "fast at small N (<1s)",
+            "different inductive bias from kernel / distance methods",
+        ],
+        "weaknesses": [
+            "memory-heavy at long sequences",
+            "can over-fit on small N (alphabet-size sensitivity)",
+        ],
+        "typical_failure": "very-smooth non-symbolic signals lacking discrete motifs",
+        "ucr_evidence": "Coffee N=5: 100% (tied); Wafer N=5: 87% (+5.5pp vs Rocket)",
+        "min_samples_per_class": 3,
+        "multiclass_support": True,
+        "max_sequence_length": 5000,
+        "cost_level": "low",
+        "preprocessing_requirements": ["none"],
+    },
+    "catch22": {
+        "class": "Catch22 (Lubba 2019) — 22 canonical features + RandomForest",
+        "assumes": [
+            "hand-engineered feature set (selected by mutual information) captures task",
+            "Random Forest exploits feature interactions",
+        ],
+        "strengths": [
+            "robust across diverse domains",
+            "interpretable feature contributions",
+            "moderate cost (~2s at N=5)",
+        ],
+        "weaknesses": [
+            "ceiling lower than kernel methods on subtle patterns",
+            "feature engineering may miss task-specific signals",
+        ],
+        "typical_failure": "tasks requiring local pattern detection at fine scale",
+        "ucr_evidence": "BeetleFly N=5: 85% (+10pp Rocket); Wafer N=5: 83.5%; Coffee N=5: 100%",
+        "min_samples_per_class": 2,
+        "multiclass_support": True,
+        "max_sequence_length": 10000,
+        "cost_level": "low",
+        "preprocessing_requirements": ["none"],
+    },
 }
 
 

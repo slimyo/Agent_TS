@@ -2,5 +2,13 @@
 # research artifacts
 research/datasets/raw/
 research/results/
+research/datasets/
 __pycache__/
 *.pyc
+*.env
+.codegraph
+*.log
+*.jsonl
+/results/
+.llm_cache/
+/external/

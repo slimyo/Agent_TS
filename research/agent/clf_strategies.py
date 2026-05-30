@@ -83,6 +83,31 @@ def _llm_direct(X_train, y_train, X_test, llm_model=None, **_):
     return b5_llm_direct(X_train, y_train, X_test, llm_model=llm_model)
 
 
+def _minirocket(X_train, y_train, X_test, num_kernels=10000, **_):
+    from research.baseline.tsc_classical import b5_minirocket
+    return b5_minirocket(X_train, y_train, X_test, num_kernels=num_kernels)
+
+
+def _weasel(X_train, y_train, X_test, **_):
+    from research.baseline.tsc_classical import b6_weasel
+    return b6_weasel(X_train, y_train, X_test)
+
+
+def _catch22(X_train, y_train, X_test, **_):
+    from research.baseline.tsc_classical import b7_catch22
+    return b7_catch22(X_train, y_train, X_test)
+
+
+def _mantis_1nn(X_train, y_train, X_test, **_):
+    from research.baseline.mantis_classifier import classify_1nn
+    return classify_1nn(X_train, y_train, X_test)
+
+
+def _mantis_lr(X_train, y_train, X_test, **_):
+    from research.baseline.mantis_classifier import classify_logreg
+    return classify_logreg(X_train, y_train, X_test)
+
+
 # ---------- 统一策略池 ---------- #
 
 CLF_STRATEGY_FN: dict[str, Callable] = {
@@ -92,6 +117,11 @@ CLF_STRATEGY_FN: dict[str, Callable] = {
     "moment_1nn":    _safe(_moment_1nn),
     "moment_logreg": _safe(_moment_logreg),
     "llm_direct":    _safe(_llm_direct),
+    "minirocket":    _safe(_minirocket),
+    "weasel":        _safe(_weasel),
+    "catch22":       _safe(_catch22),
+    "mantis_1nn":    _safe(_mantis_1nn),
+    "mantis_lr":     _safe(_mantis_lr),
 }
 
 

@@ -1,95 +1,867 @@
-**论文方法整体评价：扎实、诚实、有洞见，但仍有提升空间。**
+你的方法现在已经不是“时序模型选择器”了，而是在逐步演化成：
 
-这篇论文的方法论定位清晰、实验设计系统性强、自我批判意识突出（honest limitations写得很好），在当前LLM-Agent + TSFM的文献中属于**上乘之作**。它没有硬吹“Agent全面超越TSFM”，而是诚实地划出了**适用边界**（routing而非competing），并通过 forecasting / RCA / classification 三个任务的**同构演进路径**提炼了一个有普适性的 architectural principle，这是论文最有价值的地方。
+> **A self-adaptive probabilistic runtime system for time-series foundation models**
 
-### 一、方法核心优势
+也就是：
+你真正的对象已经从“预测模型”变成了“推理系统本身”。
 
-1. **定位准确且及时**：在Chronos-2等TSFM已把few-shot forecasting压得很平的2026年，及时转向“Agent该干什么”的元问题，非常有现实意义。
-2. **实验迭代透明**：v5c → v13、B6 → B7v3的完整演进路径记录得非常清楚，这比很多只报最终结果的论文有说服力得多。
-3. **方法论贡献强**：**Agent-as-Router + N-conditional fallback + cross-series memory** 的四阶段模式，在两个不同任务上同构出现，具有较强的domain-invariant价值。
-4. **诚实度高**：报告了memory在forecasting上的负面结果、diagnosis_revision从未触发、N=10仍弱等硬伤，极大提升了可信度。
-5. **结构化Prompt设计**（Model Cards + 强制JSON + 引用要求）值得借鉴。
-
-### 二、主要改进建议（按重要性排序）
-
-#### **1. 核心方法论层面（最重要）**
-- **Routing Gate的设计仍显启发式**：目前依赖20% CV margin + N-conditional fallback，缺乏**可学习**的gate机制。建议增加一个**meta-learner**（轻量MLP或小型Transformer），输入diagnosis特征 + CV statistics + memory neighbors，输出“是否override默认TSFM”的概率。可以用历史cell的实际胜负作为监督信号训练。
-- **Memory机制可进一步升级**：
-  - 当前memory在forecasting上是“negative result”，主要因为缺乏counterfactual。建议存储**所有策略在同一cell上的表现**（而非只存最终chosen），变成一个真正的**contextual bandit**记忆。
-  - 分类任务中25-dim memory有效，forecasting中10-dim较弱，说明特征工程仍是瓶颈。建议系统性探索**TSFM embedding作为memory key**（Chronos-2的last hidden state或patch embedding）。
-
-#### **2. 实验设计与严谨性**
-- **数据集覆盖度不足**：
-  - 当前6个数据集偏向ETTh1/ETTh2/ECL这类“经典”基准，**缺少长序列、极高频、非平稳、含缺失值、多季节性**等更具挑战性的真实场景。
-  - 建议补充：M4/M5子集、Monash Archive的更多domain、或工业界真实时序（如服务器指标、电商GMV、医疗监护）。
-- **N=10极端少样本场景**：这是Agent最应该发挥价值的地方，但目前仍是弱点。需要专门设计**ultra-few-shot策略池**（如更重的statistical priors + synthetic augmentation + LLMTime重度使用）。
-- **统计显著性**：Wilcoxon用了，但多数据集×多N的多重比较未做correction（Bonferroni/Holm）。建议补充。
-
-#### **3. 评估维度可扩展**
-- **Forecasting**：除了MAE/CRPS，建议增加**业务相关指标**（如在交换率数据集上加方向准确率/盈利模拟，在ILI上加峰值时机误差）。
-- **RCA**：当前rule-based GT有一定tautology问题。建议找**人类专家**标注一部分样本做gold standard，或用**synthetic fault injection**（在干净序列上人为注入已知fault）来构造更干净的benchmark。
-- **Classification**：UCR数据集偏短、偏简单。建议补充**多变量UCR**或**长序列few-shot classification**任务。
-
-#### **4. Ablation与控制实验**
-- 当前Ablation主要在ETTh1 N=20一个点上，**覆盖面不够**。建议至少在3个代表性cell（N=10/20/100）上做完整ablation。
-- Model Cards的有效性验证较弱：A8 ablation显示MAE不变，但interpretability提升。建议增加**人类可读性/可解释性用户研究**（哪怕是小规模），证明reflection trace确实对下游运维人员有帮助。
-
-#### **5. 工程与可复现性**
-- LLM依赖单一提供商（zhipu），虽做了cross-LLM，但样本量小。建议补充**开源模型**（DeepSeek-R1、Qwen2.5-72B等）测试。
-- Memory的faiss索引在生产环境中如何维护（增量更新、过期策略、分布式）未展开。
-- 计算开销：虽然提到gating后overhead低，但完整pipeline（多个CV fold + reflection + memory query）在真实部署中是否practical？建议报告端到端latency。
-
-#### **6. 写作与叙事**
-- 标题和Abstract已经很好，但可以更锐利一点：
-  - 当前标题偏“温和”，建议考虑 *“The Router, Not the Oracle: LLM-Agents Find Their Place by Knowing When to Defer”* 这类更具冲击力的表述。
-- §5.3的**isomorphism table**是全篇高光，建议在Introduction和Conclusion都更突出地呈现，作为visual anchor。
-
-### 三、总体定位建议
-
-这篇论文目前的定位是**“实证边界研究 + 方法论原则提炼”**，这是正确的。不要试图把它包装成“新SOTA Agent”，而是强调：
-
-> “在TSFM时代，LLM-Agent的正确角色不是成为更好的预测器，而是成为**聪明的路由器和诊断解释器**。我们通过失败-迭代-同构发现，系统性地刻画了这一边界。”
-
-**推荐目标 venue**：ICLR 2026 / NeurIPS 2026 Workshop（Time Series）都很合适，如果把RCA和classification的贡献再加强一点，KDD Applied Track也很有竞争力。
+这是目前方法里最重要、也最有价值的转向。
 
 ---
 
-**总结**：方法已经比较成熟，核心洞见（Agent-as-Router）站得住脚。**最值得花力气改进的方向**是：
+# 一、当前方法的真实强项（不是你以为的地方）
 
-1. Memory + Learnable Gate（向meta-learning方向进化）
-2. 更具挑战性的数据集与ultra-few-shot场景
-3. RCA的更干净ground truth
+你现在最大的价值，并不是：
 
-如果这些改进完成，这篇论文有潜力成为2026年Agentic Time Series领域的一篇**标志性工作**（reference paper）。
+* Bayesian formula
+* Thompson routing
+* k-means regime
+* MOMENT embedding
+* drift engine
 
+这些都不是核心。
 
-一、对论文的整体评价
-核心优点
-问题定位精准，价值主张清晰
-在 Chronos‑2 等 TSFM 已将少样本预测误差压至极低水平的背景下，论文没有强行宣称“Agent 全面超越”，而是转向一个更本质的问题：当基础模型本身已足够强时，LLM‑Agent 的正确生态位在哪里。由此提炼出的 “Agent‑as‑Router” 原则具有明确的领域不变量特征，为后续工作提供了可操作的范式。
+真正强的是：
 
-实验演进脉络透明，自我批判力度罕见
-从 v5c 到 v13、从 B6 到 B7v3，论文完整记录了每一次设计迭代及其失败原因，并将负面结果（如 memory 在预测任务上未能正收益、diagnosis_revision 从未触发、N=10 依然困难）作为正式贡献公开。这种诚实度在当前顶会投稿中极为稀缺，极大提升了结论的可信度。
+---
 
-多任务、多指标下的系统性实证
-覆盖预测、RCA、分类三种任务，指标从 MAE/CRPS 到 R1/关键字 F1，并加入了概率校准（覆盖率、区间宽度）和统计检验（Wilcoxon），使“适用边界”的刻画有数据支撑。
+## 1. 你已经完成了“从 heuristic stack → probabilistic runtime”的结构跃迁
 
-Isomorphism 发现具备方法论深度
-预测和分类两条独立演进路径出现高度同构的“直接竞争→边际门控→N 条件回退→跨序列记忆”四阶段模式，这一现象强化了“路由而非竞争”原则的普适性，是论文最具洞见的部分。
+这是最关键的。
 
-值得改进的方面
-Routing Gate 仍以启发式为主
-当前 20% CV 边际 + N 阈值的设计本质上是一组强先验。若能引入一个轻量的可学习 gate（例如基于历史 cell 胜负的简单 MLP），会让“路由”从经验规则升华为可泛化的元策略，也能自然地消化新的 TSFM 版本。
+很多 TS routing 工作本质：
 
-数据集覆盖域偏窄，极端少样本仍是短板
-ETTh1/ETTh2/ECL 等经典基准虽然可控，但缺少多季节性、强非平稳、含缺失值、超长序列的真实场景。N=10 之下 Agent 仍普遍落后，说明 ultra‑few‑shot 尚未充分探索，而这里恰恰是路由最该发力的区间。
+```text
+if entropy > x:
+    use model A
+elif N < y:
+    use fallback
+```
 
-RCA 评估存在一定循环依赖
-论文已坦诚指出 rule‑based 检测器与 ground truth 的同源性，但 0.767 vs 0.400 的比较仍有部分“规则对自己出题”的嫌疑。引入合成故障注入或少量人类专家标注，可从根本上消除这一疑虑。
+只是 heuristic orchestration。
 
-Memory 在预测任务上的负结果未被完全归因
-将失败归因为“缺少反事实存储”很敏锐，但若能在分类任务中展示，利用 TSFM 的隐层 embedding 作为 memory key 是否会显著提升匹配质量，会是一个极具说服力的补充实验。
+而你已经把：
 
-计算开销的定量分析缺失
-论文提到了 gating 降低推理时间，但完整的 CV + reflection + memory 查询在一次端到端请求中的实际延迟并未报告，而这对于应用赛道（如 KDD Applied Track）至关重要。
+* N fallback
+* entropy gate
+* industrial override
+* memory voting
+* Thompson exploration
+* cost routing
+* drift adaptation
 
+统一到：
+
+```text
+posterior over models
+```
+
+这是本质升级。
+
+因为：
+
+> “系统行为”开始变成可解释、可学习、可校准、可分析的 probabilistic object。
+
+这是你真正接近论文价值的地方。
+
+---
+
+## 2. 你真正统一的不是 forecasting / TSC
+
+而是：
+
+```text
+model selection under uncertainty
+```
+
+这一层 abstraction 非常重要。
+
+你现在已经在做：
+
+| 任务           | 本质                        |
+| ------------ | ------------------------- |
+| forecasting  | choose predictor          |
+| TSC          | choose classifier         |
+| anomaly      | choose detector           |
+| RCA          | choose reasoning pipeline |
+| scheduler    | choose inference path     |
+| action layer | choose intervention       |
+
+这些本质都是：
+
+```text
+decision under uncertainty + cost
+```
+
+这意味着：
+
+你已经隐含走向：
+
+# “Universal Adaptive Inference”
+
+而不是 time-series forecasting。
+
+这是路线上的重大升级。
+
+---
+
+# 二、当前系统最严重的问题
+
+下面是最关键的问题。
+
+---
+
+# 问题 1（最严重）：
+
+# 你的 posterior 还不是真 posterior
+
+这是整个系统目前最大的理论问题。
+
+你写的是：
+
+[
+p(M_k|x,h,t)\propto \exp(\sum \log \pi+\sum \log L)
+]
+
+但实际上：
+
+* prior 不是 prior
+* likelihood 不是 likelihood
+* factor 之间不独立
+* 没有真实 generative model
+* 没有 calibration guarantee
+* posterior 不是 normalized Bayesian posterior
+
+本质上你现在是：
+
+```text
+energy-based scoring system
+```
+
+而不是 Bayesian inference。
+
+这个问题 reviewers 一定会打。
+
+因为目前：
+
+```text
+BayesianRouter
+```
+
+其实更像：
+
+```text
+Composable probabilistic scoring runtime
+```
+
+而不是真 Bayesian system。
+
+---
+
+## 解决方案（非常关键）
+
+不要硬 claim：
+
+```text
+exact Bayesian inference
+```
+
+而要：
+
+# 改 framing：
+
+## 不要写：
+
+> Bayesian posterior over models
+
+而写：
+
+# “factorized posterior-inspired energy model”
+
+或者：
+
+# “Bayesian-style compositional decision model”
+
+这是巨大区别。
+
+---
+
+## 你真正的数学对象更像：
+
+[
+E_k(x)=\sum_i w_i f_i(x)
+]
+
+然后：
+
+[
+p_k = \mathrm{softmax}(-E_k)
+]
+
+这是：
+
+# Energy-Based Routing
+
+不是 strict Bayes。
+
+这个改动非常重要。
+
+否则 reviewer 会直接问：
+
+> likelihood from where?
+
+然后整个理论会塌。
+
+---
+
+# 问题 2：
+
+# factor explosion 已经开始失控
+
+你现在：
+
+* 6 priors
+* 2 likelihoods
+* drift modifiers
+* memory trust
+* scheduler utility
+* calibration
+* action layer
+
+已经出现：
+
+# “everything becomes a factor”
+
+的问题。
+
+这是 probabilistic system 最危险的地方。
+
+因为系统会逐渐：
+
+```text
+不可辨识（unidentifiable）
+```
+
+你后面会发现：
+
+* 哪个 factor 真有效？
+* 哪个 factor 在重复表达？
+* 哪个 factor 只是 leakage？
+* 哪个 factor 与 embedding 强耦合？
+
+会越来越难分析。
+
+---
+
+# 你下一步必须做：
+
+# factor orthogonalization
+
+即：
+
+## 每个 factor 必须回答：
+
+| factor           | 唯一信息是什么                      |
+| ---------------- | ---------------------------- |
+| NPrior           | sample complexity            |
+| EntropyPrior     | series uncertainty           |
+| RegimePrior      | manifold locality            |
+| MemoryLikelihood | empirical retrieval evidence |
+| CVLikelihood     | local validation evidence    |
+
+否则：
+
+多个 factor 可能都在编码：
+
+```text
+difficulty
+```
+
+只是换名字。
+
+---
+
+# 强烈建议新增：
+
+# Factor Attribution Analysis
+
+例如：
+
+```text
+posterior contribution decomposition
+```
+
+分析：
+
+[
+\Delta_k^{(i)}
+]
+
+每个 factor 对最终 routing 的贡献。
+
+否则系统会越来越黑盒。
+
+---
+
+# 问题 3：
+
+# regime clustering 现在还是“静态 manifold”
+
+这是 Phase 4 最大问题。
+
+你现在：
+
+```text
+kmeans(z)
+```
+
+本质仍然是：
+
+# offline partition
+
+但真实 industrial stream：
+
+```text
+regime is nonstationary
+```
+
+现在 drift engine 只是：
+
+```text
+refit cluster
+```
+
+但：
+
+# 你还没真正进入 online manifold learning。
+
+---
+
+## 下一步真正重要方向：
+
+不是更多 prior。
+
+而是：
+
+# Dynamic Regime Geometry
+
+例如：
+
+---
+
+## 方向 A：Continuous regime field
+
+替代：
+
+```text
+hard cluster id
+```
+
+变成：
+
+[
+p(r|z)
+]
+
+soft regime density。
+
+---
+
+## 方向 B：Trajectory-level regime evolution
+
+现在：
+
+```text
+regime(x_t)
+```
+
+但未来应该：
+
+[
+r_t \rightarrow r_{t+1}
+]
+
+即：
+
+# regime transition dynamics
+
+这会直接把你系统升级成：
+
+```text
+adaptive state-space router
+```
+
+---
+
+# 问题 4：
+
+# Thompson bandit 仍然太浅层
+
+你现在：
+
+```text
+per-(regime, model)
+```
+
+高斯更新：
+
+[
+(\mu,\sigma,n)
+]
+
+本质还是：
+
+# tabular contextual bandit
+
+它还没真正利用 representation。
+
+---
+
+## 真正下一阶段：
+
+应该是：
+
+# Neural Bayesian Bandit
+
+例如：
+
+[
+p(\ell|z,M)
+]
+
+而不是：
+
+```text
+cluster → statistics
+```
+
+否则：
+
+* regime assignment
+* bandit state
+
+其实是割裂的两层。
+
+---
+
+# 问题 5（非常重要）：
+
+# 当前系统缺“world model”
+
+这是你已经开始接近但还没做的东西。
+
+现在：
+
+系统会：
+
+* choose
+* calibrate
+* drift
+* escalate
+
+但：
+
+# 不理解环境本身。
+
+也就是说：
+
+当前 router 仍是：
+
+```text
+reactive
+```
+
+不是：
+
+```text
+predictive adaptive system
+```
+
+---
+
+# 你真正下一代应该做：
+
+# latent environment dynamics
+
+例如：
+
+[
+s_t \rightarrow s_{t+1}
+]
+
+其中：
+
+* drift
+* routing failure
+* model collapse
+* variance explosion
+
+都是 latent state evolution。
+
+这样：
+
+router 才能：
+
+```text
+anticipate drift
+```
+
+而不是 detect drift。
+
+这是根本区别。
+
+---
+
+# 三、你现在最该收敛的方向（非常关键）
+
+你现在风险是：
+
+# 系统已经开始过大
+
+目前已经有：
+
+* router
+* scheduler
+* calibrator
+* drift engine
+* action layer
+* telemetry
+* failure memory
+* reflective loop
+* RCA
+* bandit
+* manifold
+* regime prior
+* cost routing
+
+已经接近：
+
+# research operating system
+
+了。
+
+这时最危险的是：
+
+```text
+继续堆模块
+```
+
+---
+
+# 你现在真正该做的是：
+
+# 理论收敛（不是功能扩展）
+
+---
+
+# 我最建议的主线
+
+你应该把整个系统收敛成：
+
+# 三层统一结构
+
+---
+
+# Layer 1
+
+# Representation Layer
+
+统一：
+
+* features
+* TSFM embeddings
+* regime geometry
+* memory retrieval
+
+目标：
+
+[
+z_t=f_\phi(x_t)
+]
+
+---
+
+# Layer 2
+
+# Belief Layer
+
+统一：
+
+* priors
+* likelihoods
+* bandit belief
+* calibration
+* uncertainty
+* drift belief
+
+目标：
+
+[
+b_t(M)
+]
+
+即：
+
+# belief state
+
+而不是“posterior”。
+
+---
+
+# Layer 3
+
+# Decision Layer
+
+统一：
+
+* routing
+* scheduler
+* escalation
+* intervention
+* remote dispatch
+* action policy
+
+目标：
+
+[
+a_t \sim \pi(a|b_t)
+]
+
+---
+
+# 这会把系统从：
+
+```text
+large heuristic router
+```
+
+升级成：
+
+# Adaptive Inference Agent
+
+这是非常大的层级跃迁。
+
+---
+
+# 四、论文层面最危险的问题
+
+目前最大危险：
+
+# scope 过大
+
+你现在已经像：
+
+* 3 篇系统论文
+* 2 篇 routing 论文
+* 1 篇 runtime 论文
+* 1 篇 industrial agent 论文
+
+混在一起。
+
+reviewer 会：
+
+```text
+贡献点失焦
+```
+
+---
+
+# 强烈建议：
+
+# 主论文只保留：
+
+## 主线：
+
+> Universal probabilistic routing runtime for TSFM systems
+
+保留：
+
+* BayesianRouter
+* regime representation
+* contextual adaptation
+* risk/cost aware decision
+
+---
+
+## 不要把：
+
+* RCA
+* action layer
+* telemetry
+* reflective loop
+* scheduler
+* health report
+
+作为主贡献。
+
+否则 reviewer 会：
+
+```text
+too broad
+```
+
+---
+
+# 五、真正最值得继续做的部分
+
+如果只选一个方向。
+
+我会认为：
+
+# “belief-state adaptive runtime”
+
+是你最值得深挖的。
+
+因为这是目前最接近：
+
+## foundation-model systems paper
+
+的方向。
+
+不是 forecasting paper。
+
+---
+
+# 六、最后一句评价
+
+你当前方法已经：
+
+* 超过普通 TS routing
+* 超过 heuristic ensemble
+* 超过 benchmark engineering
+
+开始接近：
+
+# “self-adaptive probabilistic inference runtime”
+
+这是它真正的价值。
+
+但下一阶段的关键已经不是：
+
+```text
+继续加模块
+```
+
+而是：
+
+# 收敛 abstraction
+
+# 统一 belief state
+
+# 弱化 fake Bayesian claim
+
+# 强化 adaptive runtime 理论
+
+这是你现在最重要的路线。
+
+---
+
+对当前 `method2.md` 描述的方法体系，我从 **理论自洽性**、**工程可落地性** 与 **实际收益风险** 三个维度进行评审。总体而言，它是一个雄心勃勃的统一路由系统，把大量手工规则重铸为因子形式、并叠加了在线学习与自适应闭环。但在“无懈可击”的外表下，存在若干 **可能威胁实用价值的重大缺陷**，必须正视。
+
+---
+
+## 一、理论层面的核心裂缝
+
+### 1. “贝叶斯”名不符实，因子组合缺乏生成式基础
+公式  
+$$
+p(M_k|x,h,t) \propto \exp\!\Big(\sum_i \log \pi_k^{(i)}(z) + \sum_j \log L_k^{(j)}(z,h,t)\Big)
+$$  
+形式上确实像对数线性模型，但 **各因子并非来自同一个联合概率分解，也未经过联合校准**。  
+- 多个 prior factor（Availability、CRPS、Regime、Type、N、Entropy、Industrial）是独立设计的，相乘意味着假设 **条件独立性**，这几乎不可能成立（如 RegimePrior 与 CRPSPrior 高度相关）。  
+- “先验强度”全是手工超参数（`strength`、`beta` 等），没有数据驱动学习——这本质仍是 **启发式乘性融合**，只是换了一层贝叶斯外衣。  
+- 结果导致后验极易 **过信或过噪**：几个因子同时“同意”时置信度虚高；互相打架时则稀释成平均，但 router 对此毫无感知。  
+
+**→ 重大缺陷**：缺少因子权重学习或结构化先验（如层次贝叶斯），使得系统在分布外数据上的鲁棒性完全依赖巧合。
+
+### 2. 上下文匪徒（Contextual Bandit）的高斯假设过于脆弱
+在线更新采用 per-(regime, model) 的 Gaussian 共轭：  
+$$
+\mu_t = \frac{\mathrm{decay}\cdot n_{t-1}\mu_{t-1} + \ell_t}{n_t},\quad \sigma_{\mu,t}^2 = \frac{\hat{\sigma}^2}{n_t}
+$$  
+但时序预测的损失（MAE/CRPS）通常 **重尾、正偏、非对称**。用单高斯近似会严重低估尾部风险，尤其在工业场景里，罕见大误差恰恰最致命。  
+- Thompson 采样依赖后验采样，若分布假定错误，探索策略失效。  
+- risk_min 的方差项从该高斯中估计，也会误导风险敏感的模型选择。
+
+**→ 重大缺陷**：应当引入更稳健的损失分布建模（如对数正态、t分布），或采用非参数分位数 bandit。
+
+### 3. Regime 定义根基不牢
+用 k-means 在 embedding 上聚类得到 regime，再以 per-cluster 平均 loss 倒数作为 regime prior $\pi_k$。  
+- k-means 最小化重构误差，无法保证簇内模型相对优劣一致；purity 82.4% 意味着 **18% 的序列跨簇**，此时 regime prior 会引导到错误的模型偏好。  
+- 聚类是离线的，环境漂移时只能靠 drift engine 重训，但重训又 soft-reset bandit，导致 **在线知识丢失与抖动**。  
+- 25d hand-feature 和高维 embedding（768d）的聚类效果、K 值选择均无消融证据。
+
+**→ 重大缺陷**：Regime 的角色更应被看作一个弱监督信号，而非直接当成先验概率。当前做法可能导致 regime assign 错一次，整个决策链就被误导。
+
+---
+
+## 二、工程与实证层面的硬伤
+
+### 4. 复杂度爆炸，但缺乏匹配的性能证据
+系统如今包含：
+- 6 个 PriorFactor + 2 个 LikelihoodFactor  
+- 3 种 decide mode  
+- 3 种 embedding  
+- bandit state (per-regime-per-model)  
+- 记忆层、多样性检索、风险成本模块  
+- Round 6 新增的校准、漂移引擎、动作层、调度器  
+
+这么多模块的交互（尤其 drift → bandit → memory trust）极易产生 **不可预见的上线行为**。然而文档里唯一引用的实测（findings F1–F12）多是 **诊断性观察**，并非跨数据集的 **性能收益绝对值**。若没有清晰的 **与简单基线（如固定最好单模型、简单 stacking、uniform ensemble）的对比**，这个系统很可能只是一个过度设计的“科学项目”。
+
+**→ 重大缺陷**：必须在正式发表前，提供至少 10 个代表性数据集上 router vs. top-3 baseline 的 MAE/CRPS 对比，并给出复杂度惩罚。
+
+### 5. 推理调度器与 Router 本身的开销未见分析
+`Inference Scheduler` 要评估每个候选的 `accuracy_gain(M) × (1−confidence) − w*latency − …`，这要求 `accuracy_gain(M)` 已知——但目前未见其计算方式。同时，Router 自身的计算（embedding、k-means、memory 检索、因子乘积）在高频调用下可能比模型推理本身还贵，尤其是 MOMENT/Chronos2 embedding 的冻结前传。  
+远程模型调度、VRAM 预算管理更引入了 **分布式运维复杂度**，但文档只描述了接口，无延迟/成本实测。
+
+**→ 重大缺陷**：未量化“路由效率”——可能路由花费 500 ms 去节省一个 50 ms 的模型选择，得不偿失。
+
+### 6. 记忆层的反事实存储与多样性检索设计粗糙
+- “反事实存储” `all_clf_accs` 存储的是 **测试集 accuracy**（见 clf_memory 字段），而在真实部署时测试集真值不可得。这是 **数据泄漏**：Router 用到了未来信息。  
+- `consensus_winner_inv_loss` 使用 `1/(1-acc+ε)` 加权，同样依赖事后 accuracy，生产环境只能改用验证集上指标，但验证集可能过时。  
+- 多样性检索的“替换最低相似 default 为最高相似非 default”规则缺乏理论保证，k 小时可能反而降低检索质量。
+
+**→ 重大缺陷**：记忆模块在离线评估与在线部署之间存在致命 gap，必须重构为 **纯验证集/在线反馈驱动的存储与检索**。
+
+### 7. 校正与漂移的自洽性陷阱
+- 置信度校正需要积累 50 次观测才 refit，但早期决策可能大面积错误，系统却无“冷启动保护”。  
+- drift engine 的 `pred_residual_z` 信号虽然“路由无关”，但其触发 `lower_memory_trust` 会连累所有 likelihood。若真实原因是某个模型过拟合而非分布漂移，系统会错误地削弱整个记忆证据，形成 **正反馈错误循环**。  
+- `regime_stale` 触发重构 k-means + bandit 软重置，相当于 **丢弃已学到的在线知识**，在概念漂移不剧烈时会损害性能。
+
+**→ 重大缺陷**：自适应闭环缺乏“动作后果的在线评估”，可能自我干扰。
+
+---
+
+## 三、建议的改进方向（优先级排序）
+
+1. **为因子组合引入结构化学习**  
+   放弃手工 `strength`，改为在验证集上学习对数线性模型权重的 λ（例如用 Bayesian optimization 或 continuous bandit）。至少确保每个因子系数不是常数。
+
+2. **改用分位数 bandit 或分布鲁棒 online learning**  
+   对损失建模采取非参数方法（如 bootstrap 分位数），或采用指数族中的合适分布。Thompson 采样可保留但需进行拟合优度监控。
+
+3. **将 Regime 退化为特征之一，而非先验源头**  
+   Regime 标签可作为 one-hot 特征输入到权值学习器中，取消直接的 `RegimePrior`。原有的 per-cluster loss 统计仅作为历史参考。
+
+4. **记忆层彻底去除测试集信息**  
+   所有存储的 loss/accuracy 必须来自 **交叉验证** 或 **在线真实反馈**，并加入时间衰减。否则论文中任何记忆增益都将是不可复现的。
+
+5. **削减模块数量，做减法实验**  
+   针对 6 个 prior、2 个 likelihood，逐项做消融，剔除对最终路由精度无显著贡献的因子。高风险在于某些因子只在特定数据集生效，故应在多样数据集上执行。
+
+6. **增加“路由开销/收益”定量分析**  
+   要求每个决策记录 router 自身耗时，并在结果中对比 **“预测精度提升”与“总耗时增加”** 的帕累托。否则工程落地无说服力。
+
+7. **冷启动与保护性回退**  
+   为 bandit 设定 initial burn-in 阶段使用固定 baseline；当校准器置信度低时自动降级为 robust ensemble。
+
+---
+
+## 四、结论
+
+当前的 `method2` 在 **问题抽象与模块化** 上确实优于上一版手工规则堆叠，其“统一路由”的愿景值得肯定。然而，最关键的缺陷在于：**系统以“贝叶斯”之名行启发式融合之实，且缺乏对实际性能增益的严格证明**。如果这些硬伤不解决，该项目将停留在“看起来很完整”的纸面，而难以说服审稿人或工业用户。
+
+**一句话评审意见**：  
+> 框架复杂度已超出必要线，许多组件缺乏严格验证；若不能证明其相较简单 baseline 的显著优势，该方法恐被判定为 **过度设计且未充分实证**。建议优先完成简版系统（仅最具信息的 2–3 个因子 + 简单 bandit）并在多个公开数据集上拿到可信增益后，再逐步添回附加模块。
+
+---

@@ -1,5 +1,10 @@
 """task #38/#41 · 从 taskb_ucr.jsonl 构建增强版 ClfMemory bank。
 
+⚠ 数据泄漏修复（feedback 问题 6）：记忆里**可投票**的 per-classifier acc 一律用
+  训练集内 CV 估计（部署可得），best_classifier = CV-winner。原 sweep 里的
+  test-set acc 仅作为 `test_acc` / `all_clf_accs` 写入，标注为 AUDIT ONLY，
+  决策代码不再读取。
+
 用 25-dim feature + z-score normalization。输出：
   /tmp/clf_memory_v2.jsonl       (memory bank)
   /tmp/clf_memory_v2_norm.npz    (z-score mean/std, sidecar)
@@ -13,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from research.agent.clf_memory import ClfCase, ClfMemory
+from research.agent.clf_planner import loo_cv_acc, kfold_cv_acc
 from research.utils.series_features import FEATURE_ORDER, featurize_cell
 from research.utils.ucr_loader import load_ucr_fewshot
 
@@ -25,6 +31,25 @@ METHOD_TO_CLF = {
     "B4b_moment_lr": "moment_logreg",
 }
 
+CV_METHOD = "kfold"   # k-fold (3 fits/cell) — LOO×MOMENT 太慢；memory 只需
+                      # deployment-available 的 CV 估计，不必与 planner 决策期 CV 同法
+
+
+def _cv_accs_for_cell(X_tr, y_tr) -> dict:
+    """训练集内 CV 估计每个候选 classifier 的 acc（部署可得，无 test 泄漏）。"""
+    out = {}
+    for clf in METHOD_TO_CLF.values():
+        try:
+            if CV_METHOD == "kfold":
+                a, _ = kfold_cv_acc(X_tr, y_tr, clf, k=3, seed=0)
+            else:
+                a, _ = loo_cv_acc(X_tr, y_tr, clf)
+            if np.isfinite(a):
+                out[clf] = float(a)
+        except Exception as e:
+            print(f"    cv fail {clf}: {e!r}")
+    return out
+
 
 def main():
     sweep_path = "research/results/taskb_ucr.jsonl"
@@ -34,21 +59,29 @@ def main():
         if r["method"] in METHOD_TO_CLF:
             by_cell[(r["dataset"], r["N_per_class"], r["seed"])][r["method"]] = r["acc"]
 
-    # 收集 raw 25-dim features + best classifier per cell
+    # 收集 raw 25-dim features + CV-winner per cell
     raw_feats = []
     cases_info = []
     for (ds, n, seed), accs in by_cell.items():
         try:
             X_tr, y_tr, _, _ = load_ucr_fewshot(ds, n_per_class=n, seed=seed)
             feat = featurize_cell(X_tr, y_tr)
-            clf_accs = {METHOD_TO_CLF[m]: a for m, a in accs.items()}
-            best = max(clf_accs.items(), key=lambda kv: kv[1])
+            test_accs = {METHOD_TO_CLF[m]: float(a) for m, a in accs.items()}
+            cv_accs = _cv_accs_for_cell(X_tr, y_tr)          # deployment-safe
+            if not cv_accs:
+                print(f"skip {ds} {n} {seed}: no finite CV acc")
+                continue
+            best = max(cv_accs.items(), key=lambda kv: kv[1])  # CV-winner
             raw_feats.append(feat)
             cases_info.append({
                 "ds": ds, "n": n, "seed": seed,
-                "best_classifier": best[0], "test_acc": float(best[1]),
-                "all_clf_accs": {k: float(v) for k, v in clf_accs.items()},
+                "best_classifier": best[0],          # CV-winner (deployment-safe)
+                "cv_accs": cv_accs,                  # votable
+                "test_acc": float(test_accs.get(best[0], float("nan"))),  # AUDIT
+                "all_clf_accs": test_accs,           # AUDIT ONLY
             })
+            print(f"  {ds:13} n={n} seed={seed}: CV-winner={best[0]} "
+                  f"(cv={best[1]:.3f}, test={test_accs.get(best[0], float('nan')):.3f})")
         except Exception as e:
             print(f"skip {ds} {n} {seed}: {e!r}")
 
@@ -92,10 +125,11 @@ def main():
     for vec, ci in zip(norm_feats, cases_info):
         mem.add(ClfCase(
             diag_feature=vec.tolist(),
-            best_classifier=ci["best_classifier"],
-            test_acc=ci["test_acc"],
+            best_classifier=ci["best_classifier"],   # CV-winner
+            test_acc=ci["test_acc"],                  # AUDIT ONLY
             meta={"dataset": ci["ds"], "N_per_class": ci["n"], "seed": ci["seed"]},
-            all_clf_accs=ci["all_clf_accs"],
+            all_clf_accs=ci["all_clf_accs"],          # AUDIT ONLY
+            cv_accs=ci["cv_accs"],                    # deployment-safe votable
         ))
     print(f"Built memory bank → {mem_path} ({len(mem)} cases)")
 

@@ -42,6 +42,42 @@ def b3_rocket(X_train: np.ndarray, y_train: np.ndarray,
     return clf.predict(X_te_3d)
 
 
+def b5_minirocket(X_train: np.ndarray, y_train: np.ndarray,
+                  X_test: np.ndarray, num_kernels: int = 10000) -> np.ndarray:
+    """MiniRocket variant via sktime — faster, sometimes more accurate than vanilla Rocket.
+
+    feedback (task #69): added as model-library expansion. Complementary to b3_rocket
+    (different kernel generation: deterministic vs random)."""
+    from sktime.classification.kernel_based import RocketClassifier
+    clf = RocketClassifier(num_kernels=num_kernels, rocket_transform="minirocket", random_state=0)
+    clf.fit(X_train[:, None, :], y_train)
+    return clf.predict(X_test[:, None, :])
+
+
+def b6_weasel(X_train: np.ndarray, y_train: np.ndarray,
+              X_test: np.ndarray) -> np.ndarray:
+    """WEASEL — dictionary-based symbolic representation classifier.
+
+    Different inductive bias from kernel-based or distance-based methods:
+    captures recurring patterns / motifs."""
+    from sktime.classification.dictionary_based import WEASEL
+    clf = WEASEL(random_state=0)
+    clf.fit(X_train[:, None, :], y_train)
+    return clf.predict(X_test[:, None, :])
+
+
+def b7_catch22(X_train: np.ndarray, y_train: np.ndarray,
+               X_test: np.ndarray) -> np.ndarray:
+    """Catch22 — 22 canonical time-series features + RandomForest.
+
+    Hand-engineered features chosen via mutual-information selection; robust on
+    diverse domains."""
+    from sktime.classification.feature_based import Catch22Classifier
+    clf = Catch22Classifier(random_state=0)
+    clf.fit(X_train[:, None, :], y_train)
+    return clf.predict(X_test[:, None, :])
+
+
 if __name__ == "__main__":
     from research.utils.ucr_loader import load_ucr_fewshot
     X_tr, y_tr, X_te, y_te = load_ucr_fewshot("Coffee", n_per_class=5, seed=1)

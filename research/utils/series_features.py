@@ -165,6 +165,49 @@ def outlier_stats(x: np.ndarray) -> dict:
     }
 
 
+def industrial_stats(x: np.ndarray) -> dict:
+    """Industrial-regime markers: smoothness / noise-floor / quantization / plateau / acf decay.
+
+    Motivated by Wafer N=5 finding (industrial_case §4.19): B7v3 routes to Rocket
+    while Euclid wins by +8pp. The 25-dim Curator features did not separate the
+    low-noise smooth-signal regime where Euclid dominates.
+    """
+    x = np.asarray(x, dtype=np.float64).flatten()
+    n = len(x)
+    std = float(x.std()) + 1e-9
+    if n < 5:
+        return {"smoothness": 0.0, "noise_floor": 1.0, "quant_bits": 16.0,
+                "plateau_ratio": 0.0, "acf_decay": 0.0}
+    d = np.diff(x)
+    abs_d_norm = float(np.mean(np.abs(d)) / std)
+    smoothness = 1.0 / (1.0 + abs_d_norm)
+    # Noise floor: std of 2nd-difference (high-pass approx) over std
+    d2 = np.diff(d)
+    noise_floor = float(d2.std() / std) if n > 2 else 1.0
+    # Quantization: log2(distinct values) — low when signal is bit-quantized
+    uniq = len(np.unique(np.round(x, 6)))
+    quant_bits = float(math.log2(uniq + 1))
+    # Plateau ratio: fraction of consecutive points with |diff| < 0.01*std
+    plateau_ratio = float(np.mean(np.abs(d) < 0.01 * std))
+    # ACF decay: how fast |acf(1)| - |acf(5)|
+    try:
+        from statsmodels.tsa.stattools import acf
+        max_lag = min(n - 2, 5)
+        ac = acf(x, nlags=max_lag, fft=True)
+        if max_lag >= 5:
+            acf_decay = float(abs(ac[1]) - abs(ac[5]))
+        else: acf_decay = float(abs(ac[1]) - abs(ac[-1]))
+    except Exception:
+        acf_decay = 0.0
+    return {
+        "smoothness": _safe(smoothness),
+        "noise_floor": _safe(noise_floor),
+        "quant_bits": _safe(quant_bits),
+        "plateau_ratio": _safe(plateau_ratio),
+        "acf_decay": _safe(acf_decay),
+    }
+
+
 def extract_full_features(series: np.ndarray, meta: dict | None = None) -> dict:
     """单序列 -> 完整特征 dict（不含 meta_*）。meta 可选合并 meta 信息。"""
     out = {}
@@ -173,6 +216,7 @@ def extract_full_features(series: np.ndarray, meta: dict | None = None) -> dict:
     out.update(freq_stats(series))
     out.update(complexity_stats(series))
     out.update(outlier_stats(series))
+    out.update(industrial_stats(series))
     if meta:
         # 安全转 numeric
         if "L" in meta: out["meta_log_L"] = float(np.log1p(meta["L"]))
@@ -194,6 +238,8 @@ FEATURE_ORDER = [
     "perm_entropy", "zero_cross_rate", "extrema_density", "hurst_proxy",
     # outlier 3
     "outlier_count_z3", "outlier_rate", "variance_ratio",
+    # industrial 5 (task #66)
+    "smoothness", "noise_floor", "quant_bits", "plateau_ratio", "acf_decay",
     # meta 5
     "meta_log_L", "meta_n_classes", "meta_log_N", "meta_class_balance", "meta_log_N_total",
 ]

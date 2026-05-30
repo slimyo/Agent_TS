@@ -83,6 +83,19 @@ STRATEGY_FN: dict[str, Callable] = {
     "chronos_bolt":   _chronos_bolt,
 }
 
+# Round 3+ extended baselines wired lazily — see baseline/{tirex,toto,toto2,
+# timesfm2,moirai,moirai2,time_moe,sundial,timer}.py
+def _make_lazy(modname: str):
+    def _fn(train, val, H, season_m):
+        from importlib import import_module
+        return import_module(f"research.baseline.{modname}").predict(
+            train=train, val=val, H=H, season_m=season_m)
+    return _fn
+
+for _m in ["tirex", "toto", "toto2", "timesfm2", "moirai", "moirai2",
+           "time_moe", "sundial", "timer"]:
+    STRATEGY_FN.setdefault(_m, _make_lazy(_m))
+
 # v7: 当 ADAPTTS_CHRONOS=bolt 时，"chronos" 名义保留（trace 可读性），但实际派发到
 # Chronos-Bolt 实现（同质量 + 50× 速度，feedback F4 sanity check 实证）。
 import os as _os
@@ -241,6 +254,46 @@ class ForecastTrace:
     reflect_steps: list[ReflectStep] = field(default_factory=list)   # 新增
     diagnosis_revised: dict | None = None                            # 新增：最终累计的诊断修正
     promotion: dict | None = None                                    # v6 新增：策略 promotion 信息
+    bandit_handle: dict | None = None                                # Round 5 Phase 2: closure handle for observe_outcome
+
+
+def observe_outcome(trace: "ForecastTrace", y_true: np.ndarray,
+                    y_pred: np.ndarray | None = None,
+                    persist: bool = True) -> dict | None:
+    """Close the contextual bandit loop after observing actual test outcome.
+
+    Call this after `forecast_with_reflection(...)` once y_true is available:
+
+        pred, trace = forecast_with_reflection(...)
+        # ... actual y_true revealed ...
+        observe_outcome(trace, y_true=actual, y_pred=pred)
+
+    Updates BanditState's per-(regime, chosen) belief with the observed MAE.
+    No-op if trace was not produced by ADAPTTS_PLANNER=bandit.
+
+    Args:
+        persist: if True, save bandit state to disk after observe (recommended).
+    Returns:
+        {"regime", "chosen", "observed_mae", "updated_belief": (μ, σ)} or None.
+    """
+    if trace.bandit_handle is None: return None
+    h = trace.bandit_handle
+    if y_pred is None: return None
+    mae = float(np.mean(np.abs(np.asarray(y_true) - np.asarray(y_pred))))
+    # Round 6 · adaptive handle (preferred path)
+    if "plan" in h and "state" in h:
+        from research.agent.adaptive_planner import adaptive_observe
+        from research.agent.router_state import persist_state
+        res = adaptive_observe(h["state"], h["plan"], outcome=mae)
+        if persist: persist_state()
+        return {"adaptive": True, **res, "observed_mae": mae}
+    # legacy bandit handle
+    h["router"].observe(h["z"], h["chosen"], mae)
+    if persist:
+        h["router"].bandit.save(h["state_path"])
+    return {"regime": h["regime"], "chosen": h["chosen"],
+            "observed_mae": mae,
+            "updated_belief": h["router"].bandit.belief(h["regime"], h["chosen"])}
 
 
 def _run_plan(plan: Plan, train, val, H, season_m) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -311,6 +364,7 @@ def forecast_with_reflection(
     reflect_can_replace_best: bool = False,
     enable_promotion: bool = False,
     promotion_improve_frac: float = 0.30,
+    dataset: str | None = None,        # feedback Item 6: forward to prior-aware planner
 ) -> tuple[np.ndarray, ForecastTrace]:
     """完整流程：初始 plan → walk-forward 重加权 → 反思 → 用最优 plan 预测 test。
 
@@ -320,7 +374,155 @@ def forecast_with_reflection(
     """
     N = len(train)
     # 初始 plan
-    plan = make_plan(diag, N=N, H=H, conf_source=conf_source)  # type: ignore
+    _planner = os.environ.get("ADAPTTS_PLANNER", "").lower()
+    if _planner == "adaptive":
+        # Round 6 · Full reflective adaptive runtime
+        # Round 7 · + CircuitBreakerPrior + OperationalReliabilityPrior + safe_predict
+        from research.agent.adaptive_planner import (
+            adaptive_decide, adaptive_observe)
+        from research.agent.reflective_loop import reflective_predict
+        from research.agent.router_state import get_state
+        from research.agent.bayesian_router import (
+            RouterConfig, AvailabilityPrior, NPrior, TypePrior, CRPSPrior)
+        from research.agent.reliability_priors import (
+            CircuitBreakerPrior, OperationalReliabilityPrior)
+        from research.agent.safe_predict import safe_predict
+        candidates_a = [s for s in [
+            "chronos2", "chronos", "tirex", "toto", "timesfm2",
+            "moirai", "moirai2", "naive_drift", "arima_ets"]
+            if s in STRATEGY_FN]
+        cfg_a = RouterConfig(
+            priors=[
+                AvailabilityPrior(local_models=tuple(candidates_a), remote_models=()),
+                CircuitBreakerPrior(),                       # Round 7 P0-1
+                OperationalReliabilityPrior(strength=1.5),   # Round 7 P0-3
+                CRPSPrior(),
+                NPrior(default_model="chronos2", N_threshold=15, strength=2.0),
+                TypePrior(),
+            ],
+            decide_mode=os.environ.get("ADAPTTS_DECIDE", "argmax").lower(),
+            risk_lambda=float(os.environ.get("ADAPTTS_RISK_LAM", "1.0")),
+            embedding_name=os.environ.get("ADAPTTS_EMBED", "hand25"),
+            enable_remote=os.environ.get("ADAPTTS_ALLOW_REMOTE", "0") == "1",
+            enable_bandit=os.environ.get("ADAPTTS_BANDIT", "1") == "1",
+        )
+        state_a = get_state(os.environ.get("ADAPTTS_STATE_PATH",
+                            "research/results/router_state.jsonl"))
+        plan_a = adaptive_decide(
+            "forecast", train.astype(np.float32),
+            candidates=candidates_a, config=cfg_a, state=state_a,
+            dataset=dataset, N=N, H=H,
+        )
+        # Round 7 · safe predict wrapper around STRATEGY_FN
+        def _raw_predict(m):
+            return STRATEGY_FN[m](train, val, H, season_m)
+        _safe_meta = {}   # records actual_model used per request (for F16 routing fix)
+        def _safe_predict_fn(m):
+            res = safe_predict(
+                model_name=m, predict_fn=_raw_predict,
+                H=H, history=train,
+                fallback_model="naive_drift",
+                fallback_predict_fn=_raw_predict,
+                register_outcome=True,
+            )
+            _safe_meta[m] = {
+                "fallback_used": res.fallback_used,
+                "actual_model": res.chosen_model,
+                "failure_type": res.failure_type,
+            }
+            return res.pred
+        try:
+            ref_res = reflective_predict(
+                plan_a, _safe_predict_fn, history=train,
+                tau_gap=float(os.environ.get("ADAPTTS_GAP_TAU", "0.10")),
+                enable_l2=False, enable_l3=True,
+            )
+        except Exception as _re:
+            ref_res = None
+
+        # ─── Round 7 fix · pick a guaranteed-safe model for downstream _run_plan ─
+        # The adaptive top-1 might be a model that failed (moirai/etc). safe_predict
+        # already fell back; we must reflect that in plan.strategies so the
+        # subsequent _run_plan call uses the same safe model, not the failed one.
+        safe_chosen = plan_a.chosen
+        if plan_a.chosen in _safe_meta:
+            meta = _safe_meta[plan_a.chosen]
+            if meta["fallback_used"]:
+                safe_chosen = meta["actual_model"]
+        if safe_chosen not in STRATEGY_FN or safe_chosen == "<zero>":
+            safe_chosen = "chronos2"
+        # Save bandit + telemetry state right away (persist for next call)
+        try:
+            from research.agent.router_state import persist_state
+            persist_state()
+        except Exception: pass
+
+        from research.agent.planner_prior_aware import PriorPlan
+        # Round 7 fix: always use safe_chosen (guaranteed available) for downstream
+        plan = PriorPlan(
+            level="L1",
+            strategies=[safe_chosen],
+            weights=[1.0],
+            combine="single",
+            reason=f"Adaptive(decide={cfg_a.decide_mode}) regime={plan_a.regime}; "
+                   f"orig={plan_a.chosen} safe={safe_chosen}; "
+                   f"layers={ref_res.layers_used if ref_res else ['L0']}; "
+                   f"conf={ref_res.confidence:.3f}" if ref_res else "L0",
+            posterior=dict(plan_a.top_k),
+        )
+        # stash adaptive handle for observe_outcome
+        _ADAPTIVE_HANDLE = {
+            "plan": plan_a, "state": state_a, "ref_res": ref_res,
+        }
+    elif _planner == "bandit":
+        # Round 5 Phase 2 · Contextual bandit / Thompson Routing
+        from research.agent.bandit import get_router, persist_router
+        from research.agent.planner_prior_aware import PriorPlan
+        router, emb = get_router(
+            state_path=os.environ.get("ADAPTTS_BANDIT_PATH",
+                                       "research/results/bandit_state.jsonl"),
+            decay=float(os.environ.get("ADAPTTS_BANDIT_DECAY", "1.0")),
+        )
+        decide_mode = os.environ.get("ADAPTTS_DECIDE", "thompson").lower()
+        z = emb.embed(train.astype(np.float32))
+        chosen, scores = router.decide(z, mode=decide_mode)
+        regime = router.regime_fn(z)
+        # Filter chosen to STRATEGY_FN-known models
+        if chosen not in STRATEGY_FN:
+            chosen = "chronos2"  # safe default
+        plan = PriorPlan(
+            level="L1",
+            strategies=[chosen],
+            weights=[1.0],
+            combine="single",
+            reason=f"Bandit decide({decide_mode}) on regime={regime}; chose {chosen} "
+                   f"(score={scores.get(chosen, 0):.3f})",
+            posterior=scores,
+        )
+        # stash for post-prediction observe loop (set by external caller via observe_outcome)
+        _BANDIT_HANDLE = {"z": z, "chosen": chosen, "router": router,
+                          "regime": regime, "state_path":
+                          os.environ.get("ADAPTTS_BANDIT_PATH",
+                                          "research/results/bandit_state.jsonl")}
+    elif _planner == "bayesian":
+        # Round 5 · Bayesian unification — all heuristics → prior/likelihood factors
+        from research.agent.bayesian_router import (
+            default_forecasting_router, Context, Evidence, PriorPlan_from_posterior)
+        allow_remote = os.environ.get("ADAPTTS_ALLOW_REMOTE", "0") == "1"
+        decide_mode = os.environ.get("ADAPTTS_DECIDE", "argmax").lower()
+        lam = float(os.environ.get("ADAPTTS_RISK_LAM", "1.0"))
+        router = default_forecasting_router(allow_remote=allow_remote)
+        ctx = Context(dataset=dataset, N=N, H=H, allow_remote=allow_remote)
+        chosen, post = router.decide(ctx, mode=decide_mode, lam=lam)
+        plan = PriorPlan_from_posterior(chosen, post, decide_mode=decide_mode)
+    elif _planner == "prior_aware":
+        # Round 4 · prior_aware (heuristic stack baseline for ablation)
+        from research.agent.planner_prior_aware import make_prior_plan
+        allow_remote = os.environ.get("ADAPTTS_ALLOW_REMOTE", "0") == "1"
+        plan = make_prior_plan(dataset=dataset, N=N, H=H,
+                               allow_remote=allow_remote)  # type: ignore
+    else:
+        plan = make_plan(diag, N=N, H=H, conf_source=conf_source)  # type: ignore
 
     # v10: N<15 跳过 walk-forward 时，若 ADAPTTS_DEFAULT 设置，仍无条件 fallback 到 default
     # 解决 N=10 cells 走 prefix-rule 导致的 catastrophic +85%~+162% 退步 (§3.1.21)
@@ -572,10 +774,15 @@ def forecast_with_reflection(
     # 用最优 plan 跑 test（train+val 一起作为已知历史）
     history = np.concatenate([train, val]) if len(val) > 0 else train
     y_test, _ = _run_plan(best_plan, history, np.array([]), H, season_m)
+    _bh = locals().get("_BANDIT_HANDLE")
+    _ah = locals().get("_ADAPTIVE_HANDLE")
+    # Round 6: adaptive handle takes precedence; we stash it under bandit_handle slot
+    handle = _ah if _ah is not None else _bh
     return y_test, ForecastTrace(
         plan_history=plan_hist, val_mae_history=val_hist,
         final_plan=best_plan, final_val_mae=best_val,
         reflect_steps=reflect_log,
         diagnosis_revised=last_diag_revision,
         promotion=promotion_info,
+        bandit_handle=handle,
     )

@@ -72,7 +72,19 @@
       "Read(//tmp/**)",
       "Bash(python -c \"import json,sys; r=json.loads\\(sys.stdin.read\\(\\)\\); print\\('First row OK. cell_id=', r['cell_id'], 'GT=', r['ground_truth']['primary_fault'], 'Agent=', r['agent_pred']['primary_fault'], 'B1=', r['b1_pred']['primary_fault']\\)\")",
       "Bash(chmod +x research/experiments/autopilot_phase64b.sh)",
-      "Bash(bash research/experiments/autopilot_phase64b.sh)"
+      "Bash(bash research/experiments/autopilot_phase64b.sh)",
+      "Bash(python -m json.tool)",
+      "Bash(pip install *)",
+      "Bash(python -c ' *)",
+      "Bash(kill 766968 766933)",
+      "Bash(awk '{print $2, $5, $7, $NF}')",
+      "Bash(kill 544948 544982 858031 858060 883761 883790)",
+      "Bash(nvidia-smi)",
+      "Bash(kill bwm848nqh *)",
+      "Bash(pkill -f \"research.baseline.timer\")",
+      "Bash(sshpass *)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

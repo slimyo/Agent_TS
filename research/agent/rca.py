@@ -34,6 +34,7 @@ FAULT_TAXONOMY_DESCRIPTION = """\
 AGENT_RCA_PROMPT = """\
 你是时序预测失败根因分析专家。根据下面信息，判断这次预测失败属于哪类根因。
 
+{dataset_prior}
 【序列诊断】（来自 Curator 三路置信度）
 {diag_text}
 
@@ -58,15 +59,22 @@ AGENT_RCA_PROMPT = """\
 - first 8: {pred_head}
 - last 8: {pred_tail}
 
-任务：从以下 5 类中**严格选一**作为 primary_fault（最主要原因），并可选 1-2 个 secondary：
+任务：判断这次预测失败的主要根因。
+
+**重要 — 决策规则（task #45 v4 fix bias）**：
+1. 先看 5 类标准 fault（见 taxonomy）。**每一类的诊断阈值是硬约束**：variance_explode 需 variance_ratio ≥ 2；outlier_burst 需 outlier_count_z3 ≥ 1；trend_break 需 split-half mean shift ≥ 2σ。
+2. **若你引用的诊断数字与某一类的硬约束矛盾**（如 variance_ratio=0.7 却要分类 variance_explode），**禁止该分类**——输出 `out_of_taxonomy` 并描述实际异常。
+3. 若 ≥3 类同时强匹配 → 优先选 evidence 最强的那个。
+4. 若没有任何一类的硬约束被满足 → 必须输出 `out_of_taxonomy`。
 
 {taxonomy}
 
 输出 JSON（仅 JSON，无其他文字）：
 {{
-  "primary_fault": "<one of: trend_break, seasonal_flip, variance_explode, outlier_burst, stationarity_flip>",
+  "primary_fault": "<one of: trend_break, seasonal_flip, variance_explode, outlier_burst, stationarity_flip, out_of_taxonomy>",
   "secondary_faults": ["...", "..."],
-  "supporting_evidence": "用 1-2 句话解释为什么是这个根因（引用具体数字 / 诊断置信度 / Model Card 假设）",
+  "evidence_consistency_check": "<我引用的诊断数字: ...; 该数字是否满足上述 primary_fault 的硬约束? yes/no>",
+  "supporting_evidence": "1-2 句解释（引用具体数字 / 诊断置信度 / Model Card 假设）；若为 out_of_taxonomy，描述实际异常模式",
   "hypothesized_repair": "如果你能选另一策略，应该选什么？为什么？"
 }}
 """
@@ -161,15 +169,68 @@ def _validate_fault(name: str) -> str:
     return "unknown"
 
 
+_ABSTAIN_CACHE = None
+
+
+def _load_abstain_head():
+    """task #46 · 加载 trained abstain head（in-tax / OOT 二分类）。"""
+    global _ABSTAIN_CACHE
+    if _ABSTAIN_CACHE is not None:
+        return _ABSTAIN_CACHE
+    import os, pickle
+    p = "research/results/abstain_head.pkl"
+    if not os.path.exists(p):
+        _ABSTAIN_CACHE = None
+        return None
+    with open(p, "rb") as f:
+        _ABSTAIN_CACHE = pickle.load(f)
+    return _ABSTAIN_CACHE
+
+
+def _apply_abstain_override(train_series, parsed: dict, threshold: float = 0.5) -> dict:
+    """task #46 · 若 abstain head predict OOT (prob > threshold) → 覆盖 LLM 输出。"""
+    head = _load_abstain_head()
+    if head is None:
+        return parsed
+    try:
+        from research.agent.abstain_head import extract_abstain_features
+        feat = extract_abstain_features(train_series).reshape(1, -1)
+        feat_z = head["scaler"].transform(feat)
+        proba = head["clf"].predict_proba(feat_z)[0, 1]  # P(OOT)
+        parsed["_abstain_proba"] = float(proba)
+        if proba > threshold:
+            parsed["_abstain_override"] = True
+            parsed["_original_primary"] = parsed.get("primary_fault")
+            parsed["primary_fault"] = "out_of_taxonomy"
+            parsed["supporting_evidence"] = (
+                f"[Abstain head override, p(OOT)={proba:.2f}] "
+                + (parsed.get("supporting_evidence", "") or "")
+            )[:400]
+        else:
+            parsed["_abstain_override"] = False
+    except Exception:
+        pass
+    return parsed
+
+
 def agent_rca(train: np.ndarray, val: np.ndarray, test: np.ndarray,
               prediction: np.ndarray, dataset: str, N: int, seed: int, H: int,
               strategy: str, adapt_mae: float, c2_mae: float,
-              season_m: int = 1, llm_model: str | None = None) -> dict:
+              season_m: int = 1, llm_model: str | None = None,
+              use_abstain: bool = False,
+              use_dataset_prior: bool = False) -> dict:
     """B5 Agent path: diagnosis + Model Cards + structured prompt."""
     d = diagnose(train, season_m=season_m)
     cards = render_cards_block(["chronos2", "chronos_bolt", "llmtime",
                                  "arima_ets", "naive_drift"])
+    # task #17 · dataset semantic prior
+    if use_dataset_prior:
+        from research.agent.dataset_priors import render_prior_block
+        dataset_prior = render_prior_block(dataset)
+    else:
+        dataset_prior = ""
     prompt = AGENT_RCA_PROMPT.format(
+        dataset_prior=dataset_prior,
         diag_text=_format_diag(d),
         cards=cards,
         dataset=dataset, N=N, seed=seed, H=H,
@@ -196,6 +257,8 @@ def agent_rca(train: np.ndarray, val: np.ndarray, test: np.ndarray,
                                   if _validate_fault(s) != "unknown"]
     parsed["_raw"] = response[:1000]
     parsed["_path"] = "agent"
+    if use_abstain:
+        parsed = _apply_abstain_override(train, parsed)
     return parsed
 
 
