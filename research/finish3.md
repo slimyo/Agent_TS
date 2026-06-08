@@ -191,3 +191,154 @@ redundant pairs (|corr| ≥ 0.8): (none)
 |---|---|---|
 | **F-R8.5** | Factor 拆解可精确重构 log_posterior（误差 0.0e+00），证明 energy model 是严格可加的、可审计的；LOFO 揭示单次决策的"决定性 factor"未必是 Δmargin 最大者——`cv` Δmargin=+2.0 但去掉只让 KL=0.585 且**不翻转**，而 `crps`/`availability` Δmargin 小却翻转 argmax（因为它们改变的是 runner-up 之外模型的可行域）。**KL_drop / argmax_changed 比 Δmargin 更能反映 factor 的因果影响力** | §7.1 |
 | **F-R8.6** | 当前 6 forecasting factor 在 200 次 sweep 上**无 |corr|≥0.8 冗余对** → 现阶段 factor 集尚未触发 feedback 问题 2 的 unidentifiability；`AvailabilityPrior`(±1e6 硬 mask) 数值上需 clip=50 才能与软 factor 同量纲对比，印证它本质是**约束**而非偏好 factor。redundancy_matrix 提供了后续加 factor 时的**自动护栏**（新 factor 与既有高相关 → 拒绝合入） | §7.2 |
+
+---
+
+## 8. M9 · Memory 数据泄漏修复 · 诚实 vs 泄漏对比（feedback 问题 6）
+
+文件：`clf_memory.py` / `bayesian_router.py` / `clf_planner.py` / `experiments/build_clf_memory_v2.py` + 新 `experiments/taskb_router_v3_honest_sweep.py`。
+
+### 8.1 同 30 cell UCR few-shot 对比（B7v3）
+
+| 系统 | mean acc | vs Rocket-alone |
+|---|---|---|
+| Rocket-alone (B3) | 87.53% | — |
+| **B7v3 LEAKED**（投票用 test-acc + 自身 case 在库）| **88.42%** | **+0.89pp**（曾宣称"击败 Rocket"）|
+| **B7v3 HONEST**（CV 投票 + leave-one-cell-out）| **86.91%** | **−0.62pp** |
+
+**泄漏虚高 = +1.51pp**。
+
+### 8.2 路由分布变化
+
+```
+LEAKED routing:  rocket 25 / moment_1nn 4 / dtw 1
+HONEST routing:  rocket 15 / moment_1nn 10 / euclid 4 / dtw 1
+```
+
+choice 翻转的 10 个 cell 全是"泄漏版正确黏住 rocket、诚实版被 CV-winner 带偏"：
+- Coffee N=5/10：泄漏 rocket(1.00) → 诚实 moment_1nn(0.89~0.96)（CV 在小样本饱和=1.0 误选 moment）
+- ECG200 N=5：泄漏 rocket(0.83) → 诚实 euclid(0.76~0.80)
+- BirdChicken N=10：泄漏 rocket(0.90) → 诚实 moment_1nn(0.80)
+- （仅 ECG200 N=10 诚实版 euclid 反超 rocket +0.03~0.09，少数正向）
+
+### 8.2.1 逐-cell 对比（全 30 cell，`*`=路由选择变化）
+| dataset | N | seed | rocket | LEAK 选择/acc | HONEST 选择/acc | Δacc |
+|---|--|--|--|--|--|--|
+| BeetleFly | 3 | 1 | 0.750 | rocket 0.750 | rocket 0.750 | +0.000 |
+| BeetleFly | 3 | 42 | 0.900 | rocket 0.900 | rocket 0.900 | +0.000 |
+| BeetleFly | 5 | 1 | 0.750 | moment_1nn 0.950 | moment_1nn 0.950 | +0.000 |
+| BeetleFly | 5 | 42 | 0.800 | moment_1nn 0.750 | moment_1nn 0.750 | +0.000 |
+| BeetleFly | 10 | 1 | 0.900 | moment_1nn 0.950 | moment_1nn 0.950 | +0.000 |
+| BeetleFly | 10 | 42 | 0.900 | moment_1nn 0.950 | moment_1nn 0.950 | +0.000 |
+| BirdChicken | 3 | 1 | 0.650 | rocket 0.650 | rocket 0.650 | +0.000 |
+| BirdChicken | 3 | 42 | 0.700 | rocket 0.700 | rocket 0.700 | +0.000 |
+| BirdChicken | 5 | 1 | 0.900 | rocket 0.900 | rocket 0.900 | +0.000 |
+| BirdChicken | 5 | 42 | 0.600 | dtw_1nn 0.600 | dtw_1nn 0.600 | +0.000 |
+| **BirdChicken** | **10** | **1** | 0.900 | rocket 0.900 | moment_1nn 0.800 | **−0.100** \* |
+| **BirdChicken** | **10** | **42** | 0.900 | rocket 0.900 | moment_1nn 0.800 | **−0.100** \* |
+| Coffee | 3 | 1 | 1.000 | rocket 1.000 | rocket 1.000 | +0.000 |
+| Coffee | 3 | 42 | 0.929 | rocket 0.929 | rocket 0.929 | +0.000 |
+| **Coffee** | **5** | **1** | 1.000 | rocket 1.000 | moment_1nn 0.929 | **−0.071** \* |
+| **Coffee** | **5** | **42** | 1.000 | rocket 1.000 | moment_1nn 0.893 | **−0.107** \* |
+| **Coffee** | **10** | **1** | 1.000 | rocket 1.000 | moment_1nn 0.964 | **−0.036** \* |
+| Coffee | 10 | 42 | 1.000 | rocket 1.000 | moment_1nn 1.000 | +0.000 \* |
+| ECG200 | 3 | 1 | 0.800 | rocket 0.800 | rocket 0.800 | +0.000 |
+| ECG200 | 3 | 42 | 0.730 | rocket 0.730 | rocket 0.730 | +0.000 |
+| **ECG200** | **5** | **1** | 0.830 | rocket 0.830 | euclid_1nn 0.800 | **−0.030** \* |
+| **ECG200** | **5** | **42** | 0.830 | rocket 0.830 | euclid_1nn 0.760 | **−0.070** \* |
+| **ECG200** | **10** | **1** | 0.750 | rocket 0.750 | euclid_1nn 0.780 | **+0.030** \* |
+| **ECG200** | **10** | **42** | 0.810 | rocket 0.810 | euclid_1nn 0.840 | **+0.030** \* |
+| TwoLeadECG | 3 | 1 | 0.955 | rocket 0.966 | rocket 0.966 | +0.000 |
+| TwoLeadECG | 3 | 42 | 0.990 | rocket 0.993 | rocket 0.993 | +0.000 |
+| TwoLeadECG | 5 | 1 | 0.995 | rocket 0.998 | rocket 0.998 | +0.000 |
+| TwoLeadECG | 5 | 42 | 0.995 | rocket 0.993 | rocket 0.993 | +0.000 |
+| TwoLeadECG | 10 | 1 | 0.995 | rocket 0.999 | rocket 0.999 | +0.000 |
+| TwoLeadECG | 10 | 42 | 1.000 | rocket 0.999 | rocket 0.999 | +0.000 |
+
+**汇总**：路由选择变化 **10/30**（7 变差 / 2 变好 / 1 同分）；**20/30 cell 完全不受影响**（N<7 fallback 绕过 memory，或诚实 memory 也同意 rocket）。
+
+- 全部损失集中在 **Coffee + BirdChicken（5 cell，ΣΔ=−0.414）**：rocket 本就 test=0.90~1.00，泄漏版"偷看"test 黏住 rocket；诚实 CV-winner 是 moment_1nn（小样本 CV 假性饱和到 1.0），换过去掉 4~11pp。
+- 唯一正向 **ECG200 N=10（+0.03×2）**：euclid test 确实更优，诚实 memory 修对了，但量级远小于损失。
+- TwoLeadECG / BeetleFly 6 cell 路由未变（rocket 稳赢 / N<7 fallback / moment 已是共识），泄漏与否无差。
+
+### 8.3 Findings
+
+| ID | 内容 | 来源 |
+|---|---|---|
+| **F-R8.7** | **feedback 问题 6 验证成立且后果严重**：B7v3 "+0.89pp 击败 Rocket" 完全是 test-acc 泄漏的产物 —— 去泄漏后变 **−0.62pp**，泄漏虚高 +1.51pp **超过**原宣称的 +0.89pp 全部增益。结论修正：**在该 30-cell few-shot 设置下，去泄漏的 memory-augmented router 不再击败 Rocket-alone**。这正是 feedback 预言的"任何记忆增益不可复现"。论文 §5.2 的"击败 Rocket"主张必须撤回 | §8.1 |
+| **F-R8.8** | 泄漏机制是"CV-winner 与 test-winner 系统性背离"：小样本 (N_per_class≤5) LOO/kfold CV 频繁饱和到 1.000（Coffee 全 1.0、BeetleFly N=3 moment cv=0.833 但 test=0.500），CV 信号噪声极大 → 诚实 memory 投票把 router 从 rocket 带向 CV 偶然更高的 moment/euclid，而这些在 test 上更差。**根因不是 memory 机制本身，而是 few-shot 下 CV 作为 deployment proxy 的高方差** → 指向 future work：memory 应存校准后的 CV 或在线反馈，而非裸 CV acc | §8.2 + build log CV vs test 背离 |
+| **F-R8.9** | leave-one-cell-out 实测有效：诚实 sweep 给 planner 传 dataset/seed 后，`exclude_meta` 在每个查询剔除同 cell 的 case；配合 CV 投票，二者共同把泄漏的 +1.51pp 完全挤出 | §8.1 + clf_memory LOCO smoke |
+
+---
+
+## 9. Round 8+ 全量复测 · 三任务 + #72 CV 校准消融（2026-05-31）
+
+> 用户离机期间自主跑的全量测试：**预测 + 分类 + 根因(RCA)** 三任务一次性复测，并实现 + 实测
+> 路线图 **#72**（isotonic CV→test 校准）——直接检验 F-R8.8 的根因假说"few-shot CV 是高方差
+> deployment proxy，memory 应存校准后的 CV"。结论：**#72 是诚实负结果——校准反而 −0.25pp
+> （−0.62→−0.87pp），更不及 Rocket**（见 F-R8.10）。环境：本地 `tsci`（py3.10 / torch cu118 / CUDA 可用）。
+
+### 9.1 分类(TSC)· honest vs #72-calibrated（同 30 UCR cell）
+
+**改动**：`clf_memory.build_cv_calibrator`（LOCO isotonic 拟合全局 CV→E[test|CV] 曲线）
++ `consensus_winner_inv_loss_calibrated`（投票前把每个 cv_acc 映到 E[test]，权重
+`sim×1/(1−cal+ε)`），planner 加 `use_cv_calibration` 旋钮。校准曲线诚实性：训练对来自
+**其它** cell 的 (cv,test)，用 `exclude_meta` 剔除查询 cell（无泄漏）。
+
+实测校准曲线（剔除 Coffee N=5 s=1 后）：`cv=1.0→0.957  0.9→0.825  0.8→0.772  0.5→0.727`
+—— 正是 F-R8.8 预言：把饱和的 `cv=1.000` 压到 `E[test]=0.957`，杀掉 `1/(1−1.0)` 的爆炸权重。
+
+| 系统 | mean acc | vs Rocket(87.53%) | routing 分布 |
+|---|---|---|---|
+| Rocket-alone (B3) | 87.53% | — | — |
+| **B7v3 HONEST**（裸 CV inv-loss vote）| **86.91%** | **−0.62pp** | rocket 15 / moment 10 / euclid 4 / dtw 1 |
+| **B7v3 #72-CALIBRATED**（校准 CV vote）| **86.66%** | **−0.87pp** | rocket 21 / moment 7 / dtw 2 / euclid 0 |
+
+**净效果 −0.25pp（更差，−0.87pp 更不及 Rocket）**。校准如设计把路由**拉回 Rocket**
+（rocket 15→21，moment 10→7，euclid 4→**0**）——压掉饱和 CV 邻居的爆炸权重后，过度偏离的
+moment/euclid 票被收回。但这同时**误杀了 euclid 真正更优的 cell**。共改变 **7/30 cell**
+（3 好 / 1 平 / 3 坏，net **−0.074 acc**）：
+
+| cell | honest | calibrated | Δacc | 解读 |
+|---|---|---|---|---|
+| ECG200 N=5 s=42 | euclid_1nn / 0.760 | **rocket / 0.830** | **+0.070** ✓ | euclid 的 CV 假性领先被校平 → 退回 rocket（对）|
+| Coffee N=10 s=1 | moment_1nn / 0.964 | **rocket / 1.000** | **+0.036** ✓ | 饱和 CV 权重被压 → 退回 rocket（对）|
+| ECG200 N=5 s=1 | euclid_1nn / 0.800 | **rocket / 0.830** | **+0.030** ✓ | 同上 |
+| Coffee N=10 s=42 | moment_1nn / 1.000 | rocket / 1.000 | +0.000 = | 路由变但分相同 |
+| ECG200 N=10 s=1 | euclid_1nn / 0.780 | **rocket / 0.750** | **−0.030** ✗ | 此 cell euclid 真更优，校准误退回 rocket |
+| ECG200 N=10 s=42 | euclid_1nn / 0.840 | **rocket / 0.810** | **−0.030** ✗ | 同上 |
+| BeetleFly N=5 s=42 | moment_1nn / 0.750 | **dtw_1nn / 0.600** | **−0.150** ✗ | 校平 moment 后 dtw 投票反超 → 错路由（单 cell 噪声主导净值）|
+
+> ⚠️ 早前 sweep 进行中读到的中间值（87.14% / +0.23pp）是**未跑完的部分结果**，以本表 30-cell
+> 全量值 **86.66% / −0.87pp** 为准。BirdChicken N=10 两 cell 在诚实/校准版**均为 rocket**（N<7? 否；
+> 是 CV 校准前后都未触发 moment override），不在 differing 列表内。
+
+### 9.2 根因分析(RCA)· Agent vs LLM-direct（30 failure cells，复现）
+
+`taska_run_rca` + `taska_eval` 全量重跑（LLM 命中 `.llm_cache` 5279 条，零新增 API 调用）：
+
+| 方法 | R1 (Top-1) | R2 (Top-3) | 说明 |
+|---|---|---|---|
+| **Agent (Curator+Cards)** | **0.367** | **0.567** | — |
+| LLM-direct (B1) | 0.000 | 0.233 | 全部塌缩到 `trend_break`（30/30）|
+| **Agent − B1** | **+36.7pp** | +33.4pp | 复现论文 +40pp 量级主张 |
+
+Agent per-fault R1：`variance_explode 9/10`（v2 `variance_ratio` 特征直接命中）、
+`stationarity_flip 1/13` / `outlier_burst 1/6` / `seasonal_flip 0/1`（4/5 类塌缩到 variance_explode）
+—— 与 finish.md §3.6 记录的"top-1 决策步失败、候选生成 OK（R2 高）"完全一致。
+
+### 9.3 预测(Forecasting)
+
+v11=Chronos-2 parity（0W/1L/23T MAE / CRPS 0%）此前 24-cell 已固化（finish §3.1.27 + paper §4.8）。
+本轮启动 chronos2 vs adapt_ts 确认 sweep，但与 TSC 校准 sweep 抢 CPU、Chronos-2 单 cell 加载慢（本机
+仅 6GB 显存，CPU 推理为主），为保证优先把 #72 30-cell 跑完已主动中止预测 sweep（parity 结论不依赖本轮，
+已固化）。预测的诚实结论保持 finish §3.1.27：**no wrapper beats Chronos-2 systematically**。
+若要完整重测预测，建议走远程 GPU（`c220@10.192.43.66`，见 method3 §7）跑 chronos2/adapt_ts × 6 数据集。
+
+### 9.4 Findings
+
+| ID | 内容 | 来源 |
+|---|---|---|
+| **F-R8.10** | **#72 CV 校准是诚实负结果**：isotonic CV→E[test] 校准（cv=1.0→0.957，压掉饱和爆炸权重）在全量 30-cell 上把诚实 router 从 **86.91%→86.66%（−0.25pp，更差）**，差距从 −0.62 扩到 **−0.87pp**。机制：校准确实如 F-R8.8 设想把路由拉回 rocket（15→21，moment 10→7，euclid 4→**0**），改变 7 cell（3 好 1 平 3 坏，net **−0.074 acc**）；3 个修对是"饱和 CV 假性领先被校平→退回 rocket"（+0.07/+0.036/+0.03），但**全局单调曲线把 euclid 一刀切清零**——其中 ECG200 N=10 两 cell euclid 真更优却被误退（−0.03×2），加上 BeetleFly 单 cell moment→dtw 噪声（−0.15）盖过全部增益。**根因比 F-R8.8 更深**：UCR-5 few-shot 上 CV↔test 背离不是单调可校准的偏置，而是**per-cell 高方差噪声**——全局曲线修得了系统性乐观、修不掉随机翻转，且"压 moment/euclid"的副作用会**误伤少数真正该偏离的 cell**。→ 印证 F-R8.7 稳健：saturated benchmark 上 memory routing 无可复现增益，**这条离线 CV 变换的 future-work 路走不通**；真正出路是 F-R8.8 提的"在线真实反馈"而非任何 CV 的离线校准。`use_cv_calibration` 默认保持 **False** | §9.1 |
+| **F-R8.11** | 三任务全量复测一致性：TSC honest 精确复现 86.91%/−0.62pp（routing rocket15/moment10/euclid4/dtw1，与 §8.2 逐 cell 一致）；RCA Agent **R1=0.367 / R2=0.567** vs LLM-direct R1=0.000（B1 30/30 塌缩 trend_break）→ **+36.7pp**；forecasting parity 结论不变。**三任务的诚实结论在重跑下全部稳定**，论文数字有实测背书 | §9.1-9.3 |
+| **F-R8.12** | 校准曲线本身是有效诊断工具：实测（剔除 Coffee N5s1 后 LOCO 拟合）`cv=1.0→E[test]=0.957`、`0.9→0.825`、`0.8→0.772`、`0.5→0.727`，量化了 few-shot CV 的乐观偏置幅度（饱和点高估约 4pp，中段高估约 3pp，低端反而略悲观）。曲线单调且诚实（仅用其它 cell 拟合），可作"CV 可信度"离线报告，供 §F-R8.8 在线反馈方案做先验 | §9.1 校准曲线 |

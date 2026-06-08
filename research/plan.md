@@ -1,272 +1,181 @@
-# Plan · AdaptTS-Agent 项目主规划
+# plan.md — 项目总纲（Routing, Not Competing）
 
-> 重构时间：2026-05-24
-> 配对文件：`TODO.md`（任务看板）/ `finish.md`（实测结果）/ `classifier.md`（分类 Agent 框架）
-> 注：本文件经过 2 轮 pivot 后重写。原 §一-§十五 forecasting plan 的实测数据汇总见 `finish.md`；本文档保留当前直接相关的设计。
+> 本文档是项目的**总纲 / single source of truth（高层）**。
+> 配套：`method*.md`（方法细节）/ `finish*.md`（实测 + Findings）/ `TODO.md`（任务看板·权威优先级）/ `feedback.md`（外部 review 11 条硬伤）/ `classifier.md`（分类框架）/ `paper_draft.md`（论文稿）。
+> **最近重构：2026-05-30**（并入 M8 energy-based framing + M9 泄漏审计的结论）
+> **🧭 主线确立：2026-06-02** —— 见 §零（研究主线已从"提升性能"转为"决策机制本身的设计科学"）
 
 ---
 
-## 0. Executive Summary
+## 零、研究主线（2026-06-02 确立 · 权威方向）
 
-**项目目标**：在 2026 TSFM 时代，定位 LLM-Agent 在时序任务中能贡献的位置。
+> **主线：以 method4 的"决策机制"为研究对象，而非以"性能提升"为目标。**
+>
+> Round 9-10 已用诚实负结果钉死：在强 base（Chronos-2 / Rocket）饱和的 benchmark 上，
+> 任何 router 形式都收敛到 ≈base（F-R9.7/9.8/10.3）。**继续追性能是低 ROI 的死路。**
+> 但 method4 暴露出的**决策机制**本身是一个未被充分研究、且独立于"能否提分"的科学对象：
+>
+> > **一个自适应 agent 何时该行动、何时该退、凭什么相信自己的判断、如何为自己的克制辩护？**
+>
+> 这条主线把项目从 "another routing paper" 重定位为 **"the design science of a selective-action
+> decision mechanism under a strong default"**——即使性能持平，机制研究本身有发表价值
+> （feedback_m4 三 reviewer 一致：Saturation Detection + Failure Diagnostics 比再造 router 更有价值）。
+>
+> **核心研究对象 = 决策算子 `π(a | b(M|z))`**：从 belief 到"route/abstain/探索/求助"动作的映射。
+> 已知的机制级现象（待系统刻画，全是 method4 的真发现）：
+> - **F-R9.2 belief inversion**：belief 强度与正确性**负相关**（越自信越错）——决策不能信 raw 强度。
+> - **F-R9.6 gate collapse**：诚实校准的 gate 在饱和域**最优解=永不行动**（abstain 是贝叶斯最优）。
+> - **F-R10.2 damage control**：决策机制的稳健价值是"**永不显著伤害 base**"，而非提分。
+> - **F-R10.1 saturation 可检测**：oracle-gap 在未饱和域可学（corr 0.37）→ "该不该行动"是可学信号。
+>
+> 衡量标准也随之改变（采纳 feedback_m4 #93）：主指标 = **Regret-to-Oracle / Safe-Deviation-Rate /
+> Abstain-Accuracy / 决策可解释性**，而非 vs-base ±pp。
+>
+> 具体优化方向见 `TODO.md` 文首"feedback_m4 路线图"+ 本次新增的"决策机制研究方向"。
+> 设计沉淀到 `method6.md`，实测到 `finish6.md`。
 
-**最终论文骨架（论文标题待 task #37/36 后定）**
+### 零.1 决策变量四分解（Round 11 收敛 · feedback_m6 三 reviewer 一致认定为最大贡献）
+
+> Round 11 把过去 method2-5 混成单一 "confidence" 的东西，**拆成四个独立随机变量**——
+> 这是当前研究线最有价值的结构性发现（独立于提分）：
+
+| 变量 | 回答 | 现状 | 实证 |
+|---|---|---|---|
+| **saturation** `ĝ(z)` | 有没有头寸（该不该进场）| ✅ 可学（未饱和域 corr 0.37）| F-R10.1 |
+| **trust** `≈P(action safe)` | 偏离会不会**死**（避险）| ✅ conformal 可学（AUC 0.80）+ 已部署（零代价避坑）| F-R11.5/11.9 |
+| **gain** `≈E[Δreward]` | 偏离能不能**赚**（获利）| ❌ **尚缺，下一步核心** | F-R11.7（trust 排不动 gain）|
+| **proposal** | 谁来提偏离候选 | 🟡 belief / LLM 部分（LLM 2-3× trust）| F-R11.8 |
+
+**关键定论（F-R11.7，三 reviewer 公认比 F-R11.5 更重要）**：`trust ≈ 风险估计器 ≠ 效用估计器`。
+→ method6 缺的正是 **gain model**：决策应从 `if trust>τ` 升级为 `if trust>τ1 AND gain>τ2`。
+
+### 零.2 下一阶段路线 · Method7 = Trust-Aware **Gain** Routing
+
+> 演进逻辑：M4 发现 inversion → M5 发现 saturation → M6 证明 trust 只避险 →
+> **M7 自然问题：如何预测"值得偏离的收益"，而非仅"偏离是否安全"。**
+
+主线管线（method7 待建）：`saturation → proposal → trust(避险) → gain(获利) → action`。
+五个候选方向（按 reviewer 优先级 + 我方 ROI 排序，详见 `TODO.md` Round 12 路线图）：
+1. **Gain Modeling**（最高优先，补 F-R11.7 缺口）：直接回归 `gain(x)=oracle−base` / 反事实 `Y(a)`。
+2. **主战场转 Forecasting**（reviewer #1）：未饱和、正确偏离样本多，能测 trust/gain 的统计显著性。
+3. **Counterfactual / Portfolio**：从"选一个专家"→"预测各候选 outcome 分布"→"组合配比"（投资组合视角）。
+4. **Proposal Network 替代 LLM**（AlphaGo 式 policy-propose + trust-verify）。
+5. **Meta-trust / 理论界**：trust=f(conformal,disagreement,density,saturation)；selective-action regret bound。
+
+⚠️ 诚实前提（不夸大）：oracle 天花板本就低（分类 +0.4pp / 预测 ~19% rel），gain model 的目标是
+**在"避险已闭环"基础上把获利从 ~0 提到可测**（哪怕 +1~2pp 也是实质突破），而非回到"刷 SOTA"。
+
+---
+
+## 一、项目目标（一句话）
+
+复现 TSci（Time-Series Scientist）多 Agent 框架，并在 **few-shot（N=10–100）** 场景下系统回答一个问题：
+**当 TSFM（时间序列基模型）已经很强时，LLM-Agent 在系统里到底该扮演什么角色？**
+
+**论文答案（已被实验证据收敛）**：Agent 不该做"竞争性预测器"，而应做围绕基模型的
+**选择性路由 / abstain 网关**（selective router）。即把 Agent 的角色从 *prediction* 重定位为
+*meta-decision*：$m^*(x) = \arg\max_{m\in\mathcal{M}} \mathbb{E}[U(m,x)]$。
+
+---
+
+## 二、核心论点链（3 条，全部已有实证支撑）
+
+1. **TSFM Saturation Hypothesis**：当基模型预训练分布覆盖测试分布时，任何 wrapper 的
+   期望增益 → 0，但方差 > 0（部分 cell 改善、部分变差，期望相消）。
+2. **Meta-Decision reduction**：Agent 不参数化预测器本身，只参数化"选哪个预测器 / 是否弃权"
+   的选择策略，可统一约化为 selective prediction $(f, g)$。
+3. **单一架构横跨三任务**：forecasting / RCA / classification 用同一套
+   Curator + Model-Cards + Memory 骨架，失败点相同（tiny-N CV 噪声误路由）、
+   修复手段相同（N-conditional abstain 退回 base）、上限相同（平均持平、niche 正增益）。
+
+---
+
+## 三、三层系统抽象（method3 M8 后的权威表述）
+
+> 旧"Bayesian posterior"措辞已弃用 → 改 **energy-based / belief state**（M8.1，更诚实）。
 
 ```
-§1 Introduction
-   - 2026 TSFM (Chronos-2 等) 主导 forecasting → LLM Agent 价值何在？
-
-§2 Related Work
-   - ATSF, TSFM, Few-shot TSC, RCA
-
-§3 Method
-   - Curator 12-dim 诊断 + Model Cards + Memory (forecasting & TSC)
-   - Forecasting wrapper: v10 confidence-gated wrapper
-   - TSC: Agent-as-Router (B7) 而非 direct classifier
-
-§4 Forecasting Boundary (Establishing the Wall)
-   - 4.1-4.8: v5c→v13 progression，CRPS 评估
-   - Final result: v11/v13 = Chronos-2 on 24 cells (0W/1L/23T MAE, 0% CRPS)
-
-§5 Beyond Forecasting: Reasoning Tasks
-   - 5.1 TaskA RCA: Agent +40pp vs LLM-direct
-   - 5.2 TaskB TSC: Direct B6 -33pp / Router B7 -2.7pp / Router-v2 ~88% (predicted)
-   - 5.3 Boundary characterization
-
-§6 Discussion & Future Work
+  x ──► Representation z=f(x) ──► Belief b(M) ──► Decision a~π(a|b)
+        Curator 特征              energy score      risk/cost gate / abstain
+        representation.py         bayesian_router.py clf_planner.py
+        series_features.py        (softmax 归一化,    action_layer.py
+                                   非 Bayesian 后验)  drift_engine.py
 ```
 
-**核心 finding（论文级 take-aways）**
-
-1. **No AdaptTS wrapper beats Chronos-2 on forecasting** (24-cell 23T MAE / 16T CRPS)
-2. **Agent direct classification fails universally** (UCR -33pp / synthetic 4-class -17pp / 即使 statistical-aligned 任务也输 Rocket)
-3. **Agent-as-Router 大幅修复 (+30pp from B6)** —— routing 才是 Agent 价值所在
-4. **B6→B7→B7v2 progression** 完美对应 forecasting v8→v10 N-fallback 设计 → 论文最优雅双轨同构
-
 ---
 
-## 1. 数据集与切割协议
+## 四、当前进度速览（2026-05-30）
 
-### 1.1 Forecasting 数据集（§4 boundary）
-
-| Dataset | Sampling | Length | H | Season m | 主要用途 |
-|---|---|---|---|---|---|
-| ETTh1 | 1h | 17,420 | 96 | 24 | 主表 |
-| ETTh2 | 1h | 17,420 | 96 | 24 | 主表 |
-| ECL (MT_001) | 1h | 26,304 | 96 | 24 | TSFM coverage 评估 |
-| Exchange (rate_0) | 1d | 7,588 | 96 | 7 | low-coverage 数据 |
-| Weather (OT) | 10min | 52,696 | 96 | 144 | OOD memory 测试 |
-| ILI (OT) | 1w | 966 | 24 | 52 | 量纲极端 + 周采样 |
-
-**Few-shot 协议**：N ∈ {10, 20, 50, 100} × 3 seeds (1, 42, 123)
-
-### 1.2 Classification 数据集（§5 reasoning tasks）
-
-**A. UCR Univariate Archive**（10 个，已下载 `research/datasets/ucr/`）
-
-| Tier | Dataset | Train×Test | Classes | Length | Domain |
-|---|---|---|---|---|---|
-| 核心 | Coffee | 28×28 | 2 | 286 | spectroscopy |
-| 核心 | ECG200 | 100×100 | 2 | 96 | ecg |
-| 核心 | GunPoint | 50×150 | 2 | 150 | motion |
-| 极少 | TwoLeadECG | 23×1139 | 2 | 82 | ecg |
-| 极少 | BeetleFly | 20×20 | 2 | 512 | image |
-| 极少 | BirdChicken | 20×20 | 2 | 512 | image |
-| 多类 | ECG5000 | 500×4500 | 5 | 140 | ecg |
-| 多类 | Crop | 7200×16800 | 24 | 46 | remote-sensing |
-| 工业 | Wafer | 1000×6164 | 2 | 152 | manufacturing |
-| 谱学 | Strawberry | 613×370 | 2 | 235 | spectroscopy |
-
-**N-shot 协议**：N_per_class ∈ {3, 5, 10} × 2 seeds (1, 42)
-
-**B. Synthetic 4-class fault**（在 ETTh1/ECL 上注入）
-
-| Class | 注入方式 |
-|---|---|
-| 0 normal | 无注入 |
-| 1 trend_break | 中段加 ±2.5σ 阶跃 |
-| 2 seasonal_break | 后半段周期内 reverse subsequence |
-| 3 outlier_burst | 插入 4 个 ±4σ 离群点 |
-
-**C. RCA 自然失败 cells**（30 个，从 forecasting Phase 5 catastrophic 选）
-
----
-
-## 2. Strategy Pools（两个 task 各自的策略池）
-
-### 2.1 Forecasting 策略池（`agent/forecaster_reflect.STRATEGY_FN`）
-
-`naive_drift, naive_seasonal, arima_ets, chronos (=bolt aliased), llmtime, chronos2, chronos_bolt`
-
-### 2.2 Classification 策略池（`agent/clf_strategies.CLF_STRATEGY_FN`）
-
-`rocket (DEFAULT), moment_1nn, moment_logreg, dtw_1nn, euclid_1nn, llm_direct`
-
-### 2.3 Model Cards
-
-- Forecasting: `agent/model_cards.py` 5 张（naive/arima/chronos/llmtime + chronos2/bolt 4 张增补）
-- Classification: `agent/clf_model_cards.py` 6 张（含 UCR 15-cell 实证 evidence）
-
----
-
-## 3. Evaluation Metrics
-
-### 3.1 Forecasting
-
-| Metric | 用途 |
-|---|---|
-| MAE | 主表 |
-| MSE | 辅助 |
-| SMAPE | scale-invariant |
-| MASE | season-normalized |
-| **CRPS** | 概率指标（A1 之后加，§4.8） |
-| pinball q10/q50/q90 | 概率细粒度 |
-| coverage_80 / width_80 | 校准 |
-
-### 3.2 RCA (TaskA)
-
-| Metric | 用途 |
-|---|---|
-| **R1 Top-1 acc** | primary fault 单选准确率 |
-| **R2 Top-3 incl** | gt fault 是否进 top-3 |
-| R3 LLM-as-Judge | semantic（待人工/GPT-4） |
-| **R4 Keyword F1** | evidence text fault-keyword 命中 |
-| R5 Cohen's κ | 人工一致性（暂未做） |
-
-### 3.3 TSC (TaskB)
-
-| Metric | 用途 |
-|---|---|
-| **Accuracy** | per-cell |
-| **Macro F1** | 多类平衡 |
-| Routing trace (B7) | 论文可解释性 contribution |
-| Oracle gap | 上界差距 |
-
----
-
-## 4. Phase 计划
-
-### 4.1 ✅ Phase 1-5 · Forecasting Boundary（已完成）
-
-**核心实验**：6 数据集 × 4 N × 3 seeds = 72 cells，v5c→v13 progression
-
-**Final result**：
-- v11/v13 vs Chronos-2: **0W / 1L / 23T**（24 cells, eps=0.5%）
-- CRPS: v11/v13 = C2 exactly (0%), v10/v12 +16% 输
-- OOD safety-net failure (Weather N=20 v11 +505%)
-
-**论文 §4 结论**：在 2026 TSFM 时代，**没有 forecasting wrapper 能 systematic 击败 Chronos-2**——v11 是 guaranteed-parity wrapper。
-
-详 finish.md §3.1.10 - §3.1.28。
-
-### 4.2 ✅ Phase 6.1 · TaskA RCA Natural（已完成）
-
-**实验**：30 个 catastrophic failure cells × Agent (B5) vs LLM-direct (B1)
-
-**Final result**：
-- v1 Curator 10-dim: R1 40% / R2 43% / R4 16% (Agent vs B1 0%)
-- v2 Curator 12-dim: R1 37% / R2 57% / R4 30% (trade-off finding)
-
-**论文 §5.1 结论**：诊断特征 + Model Cards 让 LLM 在 statistical-label classification 上 +40pp 击败 unstructured LLM ICL。
-
-详 finish.md §3.1.29 / §3.1.31。
-
-### 4.3 ✅ Phase 6.3 · TaskB UCR（已完成）
-
-**实验**：5 UCR 数据集 × 3 N-shot × 2 seeds × 7 methods = 210 cells
-
-**Final result**：
-- B3 Rocket 87.5% (winner 7/15)
-- B4 MOMENT 81.8% (winner 6/15, BeetleFly/BirdChicken 反超)
-- B6 Agent direct 54.3% (winner 0/15) ❌
-
-**论文 §5.2 结论（旧）**：B6 直接分类失败 -33pp。
-
-详 finish.md §3.1.32。
-
-### 4.4 ✅ Phase 6.4a · Synthetic 4-class（已完成）
-
-**实验**：ETTh1/ECL × 3 N × 2 seeds × 4-fault × 7 methods = 84 cells
-
-**Final result**：B6 33.7% / Rocket 50.6% / -17pp **Agent 仍输 Rocket on statistical-aligned task**
-
-**结论**：B6 直接分类**结构性弱**——alignment 不足以让 Agent 击败 Rocket。**Routing 才是出路**。
-
-详 finish.md §3.1.33。
-
-### 4.5b ⏳ Phase 6.4b 第二批（feedback 第三轮整合 — 2026-05-24 第三 batch）
-
-**触发**：task #34 实测 avg-diag 在 UCR 跨数据集 sim 退化全 1.0 → memory consensus 不工作。feedback 直击此问题给出 4 项优化建议。
-
-**4 个新增 task（已写入 TODO）**
-
-| Task | 内容 | 设计要点 |
+| Phase | 内容 | 状态 |
 |---|---|---|
-| #38 | Memory 25-30 维扩充 | 元信息 (L, C, N_per_class, class_balance) + 频域 (FFT peak, spectral entropy) + 复杂度 (perm entropy, DFA) + z-score 标准化 |
-| #39 | 加权 vote consensus | 去 similarity_threshold=0.85 硬阈值，加权 sum + min_vote_ratio=0.6 |
-| #40 | Cards v2 扩 5 字段 | min_samples_per_class / max_sequence_length / cost_level / preprocessing / multiclass_support |
-| #41 | B7v3 完整集成 | #37 N-fallback + #38 enhanced mem + #39 weighted vote + #40 Cards v2 → 重跑 sweep |
-
-**预期 B7v3 vs Rocket** ：85% → 88-89%（mem 真正参与决策 + Cards 给 LLM 硬约束）
-
-### 4.5 🔄 Phase 6.4b · Agent-as-Router（进行中）
-
-**已完成（5/8 主线）**：
-
-- ✅ #31 CLF_STRATEGY_FN（`agent/clf_strategies.py`，6 策略统一接口）
-- ✅ #32 6 张 clf Model Cards（`agent/clf_model_cards.py`，含 UCR evidence）
-- ✅ #33 LOO/K-fold CV + classification_planner（`agent/clf_planner.py`，B7 入口）
-- ✅ #35 B7 sweep on 30 cells UCR
-- ✅ #27 Synthetic 4-class for boundary
-
-**B7 Router 主结果（finish §3.1.34）**：
-- **Mean Acc 84.8%** (vs B6 54.3%: **+30.5pp** / vs Rocket 87.5%: -2.7pp / vs Oracle 92.1%)
-- Beats Rocket: 6/30 cells (Oracle 13/30 = 46% capture rate)
-- Routing 分布: rocket 15 / moment 9 / euclid 3 / dtw 3
-- 失败模式：LOO CV 在 N=3-5 上噪声大 → BeetleFly/BirdChicken N=3 误选 -20~25pp
-
-**剩余（3/8 主线）**：
-- ⏳ #37 **B7v2 N-fallback**（next）：N<5 强制 rocket default，类比 forecasting v8→v10
-- ⏳ #34 分类 Memory layer
-- ⏳ #36 论文 §5.2 重写
-
-### 4.6 ⏳ Phase 7 · 论文整合与写作
-
-待 #37 完成后启动。
+| 1 | TSci 复现 + 环境 | ✅ |
+| 2 | Baseline 矩阵（Chronos-2 / TimesFM / MOMENT / Rocket / DTW …）| ✅ |
+| 3 | 边界评估 144 cells（no-method-dominates）| ✅ |
+| 4 | E1–E4 增强模块 + A1–A9 ablation | ✅ |
+| 5 | 概率评估 CRPS | ✅ |
+| 6.1 | RCA natural（+40pp vs LLM-direct）| ✅ |
+| 6.3 | TaskB UCR router | ✅ |
+| 6.4 | Agent-as-Router 重定位 | ✅ |
+| Round 8 | M1–M4 / M7-P1 自演化模块 | ✅ |
+| **M8** | Factor Attribution + energy framing（问题 1+2）| ✅ |
+| **M9** | **Memory 泄漏审计修复（问题 6）** | ✅ |
+| **善后** | 论文撤回"击败 Rocket"+ feedback 路线图 | 🔬 进行中（TODO P0–P2）|
 
 ---
 
-## 5. 论文 boundary characterization 总结表
+## 五、三任务最终诚实结果（post-M9）
 
-| Domain | Best baseline | Agent (B6 direct) | **Agent-Router (B7)** | Router gap |
+| 任务 | Agent 角色 | 最强 baseline | 我们最终 | 诚实差距 |
 |---|---|---|---|---|
-| Forecasting (24 cells) | Chronos-2 | v11=C2 (0) | v11=C2 (0) | parity wrapper |
-| **RCA TaskA** (30 cells) | LLM-direct (0%) | **40%** | (N/A) | **+40pp** ⭐ |
-| **TSC UCR** (30 cells) | Rocket 87.5% | 54.3% | **84.8%** | **-2.7pp** |
-| TSC Synthetic 4-class | Rocket 50.6% | 33.7% | (pending) | TBD |
+| Forecasting（24 cells）| Chronos-2 wrapper | Chronos-2 | v11 parity wrapper | 0%（CRPS，Wilcoxon p=0.32）|
+| RCA（30 cells / 5-fault）| 结构化根因分析 | LLM-direct | Curator+Cards | **+40pp R1** vs LLM-direct（但 −37pp vs 规则 baseline，诚实负结果）|
+| Few-shot TSC（30 cells UCR）| router | Rocket-alone | B7v3（router+memory, 去泄漏）| **−0.62pp（持平）**；去泄漏前虚高 +1.51pp |
 
-**论文最干净的方法学贡献（已稳定）**：
-
-> "**Agent direct classification fails universally**. Even on synthetic data where class labels are diagnostic concepts, B6 loses to Rocket -17pp. **The right architecture is Agent-as-Router**: Curator + LOO CV + Model Cards select among classifiers per cell, recovering +30pp from B6 direct and approaching parity with the SOTA Rocket baseline. **This exactly parallels the forecasting v8→v10 progression** where Agent-as-Wrapper around Chronos-2 became the right design, demonstrating a domain-invariant 'router/wrapper-around-base-models' principle for LLM-Agent systems in the TSFM era."
+> ⚠️ **关键修正（F-R8.7）**：去泄漏后 TSC router **不再击败 Rocket**。论文价值从
+> "击败 SOTA"转为 **"saturated benchmark 上 routing 的诚实评估 + 泄漏审计方法学"**。
 
 ---
 
-## 6. 风险预案
+## 六、方法版本谱系（简表，详见 method*.md）
 
-| 风险 | 现状 | 对策 |
-|---|---|---|
-| B7 仍输 Rocket | 实测 -2.7pp | **task #37 N-fallback**（预期持平/超过）|
-| LOO CV 在 N<10 噪声大 | 实证 BeetleFly N=3 输 -25pp | N-conditional gate |
-| TaskB Memory 设计未启用 | task #34 暂搁置 | optional contribution |
-| 投稿目标 | ICLR/NeurIPS 2026 Workshop or KDD 2026 Applied | 待 #37 结果定 |
+**Forecasting**：v5c 基线 → v8 TSFM 扩充（ECL/Exchange 反转）→ v9 margin gating →
+v10 N<15 fallback → v11 memory safety-net（parity）→ v12 entropy gate → v13 联合。
+
+**Classification**：B3 Rocket(87.5%) → B6 Agent direct(54.3%, −33pp) → B7v1 catastrophic →
+B7v2 N<7 fallback(86.66%) → **B7v3 router+memory(86.91% 去泄漏, −0.62pp)**。
+
+两条谱系**同构**：同样的失败（直接竞争 SOTA）→ 同样的中间症状（few-shot CV 噪声误路由）→
+同样的修复（N-conditional fallback + cross-series memory）。
 
 ---
 
-## 7. 立即下一步
+## 七、关键文件索引
 
-```
-P0 (现在): task #37 B7v2 + N<5 fallback + 重跑 sweep → 30 cells
-P1 (跑完): 写 finish.md §3.1.35 + paper §5.2 完整 narrative
-P2: task #36 paper §5.2 重写 + §5 boundary 升级 + abstract 起草
-P3 (可选): task #34 memory layer / B7v3 ensemble
-```
+| 文件 | 作用 |
+|---|---|
+| `agent/adapt_ts.py` / `forecaster_reflect.py` | Forecasting 主 wrapper（v5c–v13）|
+| `agent/clf_planner.py` | 分类 router（B7）|
+| `agent/bayesian_router.py` | Energy-based 路由 + Factor Attribution（M8）|
+| `agent/clf_memory.py` / `memory.py` / `memory_decay.py` | Memory 层（M9 去泄漏）|
+| `agent/representation.py` / `utils/series_features.py` | 特征 embedding |
+| `agent/drift_engine.py` / `action_layer.py` | Decision 层 |
+| `utils/llm.py` | LLM 接口（SiliconFlow / DashScope / DeepSeek，开源免费优先）|
+| `baseline/` | 所有基线模型封装 |
+| `experiments/` | ~60 sweep/eval 脚本（如 `taskb_router_v3_honest_sweep.py`）|
+| `results/` | 150+ 实验结果 jsonl |
+
+---
+
+## 八、下一步（权威优先级见 TODO.md）
+
+当前唯一权威优先级 = `TODO.md` 文首 **"feedback 改进路线图 #70-83"**：
+**P0 #70-72（论文善后撤回）→ P1 #73-76（理论/实证硬伤）→ P2 #77-80（收敛+scope）→ P3 #81-83（future）**。
+
+---
+
+## 九、环境与运行
+
+- conda/mamba env `tsci`（本地）/ `tsci-remote`、`tsci-remote-tx440`（远程 GPU）
+- LLM：SiliconFlow / DashScope / DeepSeek（开源免费优先，不用付费官方服务）
+- 远程 GPU：c220@10.192.43.66，2× RTX 5070 Ti
+- 运行：`python -m experiments.<name>` 或 `experiments/*.sh`

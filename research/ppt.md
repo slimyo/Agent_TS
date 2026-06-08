@@ -1,308 +1,273 @@
-# Agent + 时序 · 工业应用三大问题
+# Agent + 时序 · 工业少样本多任务自适应系统
 
-> PPT 文字稿。目标听众：高校专家 + 研究所人员。
-> 配套：`method.md`（技术方法）/ `finish-1.md`（实测）/ `README.md`（项目目标）
+> PPT 文字稿（**工程导向**）。听众：工程/研究所人员。弱化理论，突出工程可行性。
+> 指标均为**绝对值 / 上下界 / 估计类型**（基于已知数据集先验）。实验为**测试阶段**结论，后续会调整。
+> 更新：2026-06-02。配套：`method6.md` / `finish3-6.md`。
 
 ---
 
 ## Slide 1 · 总览
 
-工业场景下时间序列分析的三大核心问题，可被 **multi-Agent + TSFM (Time Series Foundation Model) routing** 框架统一：
+### 工业背景（为什么要做）
+- **即插即用刚需**：新产线 / 新工艺 / 新传感器接入即用 —— 要求 **zero-shot（零样本）+ 长视野预测**，没有时间为每个新场景重训模型。
+- **单一 TSFM 不够用**：同一个时序基础模型在不同领域**饱和度差异极大** —— Weather 上 Chronos-2 是 SOTA，但 Exchange/ECL 上落后**领域专家模型 35–44%**。没有"一招鲜"。
+- **工业更看重置信区间**：部署决策对 **CRPS（概率质量）比 MAE（平均绝对误差）更敏感** —— 工程师要的是"预测 ± 多少"，而不只是一个点。
 
-| 问题 | 工业例 | 经典做法 | Agent + TSFM |
+### 解决思路
+工业时序三大任务 —— **预测 / 分类 / 机械诊断** —— 统一于**一套"选择性自适应路由"系统**：
+
+> **同一框架：诊断序列 → 估计该不该换模型 → 在模型库里选 → 永不显著伤害默认模型。**
+
+| 任务 | 工业场景 | 默认强模型 | 系统做的事 |
 |---|---|---|---|
-| **预测** | 电力负荷、生产线产量、库存需求 | ARIMA / LSTM 单模型 | 多模型路由 + 概率集成 |
-| **分类** | 故障类型识别、产品质量分级 | Rocket / DTW | 库扩张 + Bayesian 路由 |
-| **机械问题判断** | 振动/电流异常根因、剩余寿命估计 | 阈值告警 | LLM Agent + 反事实推理 |
+| 预测 | 负荷/产量/库存 | Chronos-2 (TSFM) | 有把握时换更优 TSFM，否则守默认 |
+| 分类 | 故障类型/质量分级 | Rocket | 多分类器路由 + 少样本兜底 |
+| 机械诊断 | 振动/电流异常+根因 | 规则基线 | LLM 结构化根因 + 规则兜底 |
 
-**核心 thesis**：三个问题本质同构 — 都是 `p(model | series_regime, history)` 的概率决策。一套框架统一解决。
+**统一点**：三任务共用 *诊断 → 决策(该不该换) → 选模型 → 解释* 的同一条流水线，换任务只换模型库。
 
 ---
 
-## Slide 2 · 问题一 · 时序预测 (Forecasting)
+## Slide 2 · 任务一 · 预测 (Forecasting)
 
-### 背景
+- **背景**：新产线/新传感器要 zero-shot 长视野预测；单一 TSFM 跨域饱和度差异大（Weather 上 Chronos-2 SOTA，Exchange/ECL 落后专家模型 35–44%）；工业看 CRPS（要置信区间）甚于 MAE。
+- **输入**：少样本（N=10–100）单/多变量序列；输出未来 H 步点预测 + 置信区间。
+- **模型库**：Chronos-2 / Chronos-Bolt / TimesFM-2 / Moirai(2) / TiRex / Toto / Time-MoE / Sundial / Timer-S1 + ARIMA/naive。
+- **决策**：walk-forward 验证 + 强阈值门控，**只在明显更优时**才偏离 Chronos-2（避免小验证窗"假赢"）。
+- **工程结论（绝对/上界）**：
+  - 默认 Chronos-2 在 **25%** 的 cell 上已是最优（基于 6 数据集先验）。
+  - **理论路由增益上界 ≈ 19% rel-MAE**（oracle 对 Chronos-2，即"完美选模型"的天花板）。
+  - 系统实测：与 Chronos-2 **持平**（不伤默认），偏离仅在高把握时发生。
 
-- 工业需要 **小样本 + 多变量 + 长 horizon** 零样本预测：新产线、新工艺、传感器接入即用
-- 单一 TSFM 在不同数据域饱和度差异极大 — Weather 上 Chronos-2 SOTA，Exchange/ECL 上落后 niche specialist 35-44%
-- 工业部署对 **CRPS（概率质量）** 比 MAE 更敏感（决策需要置信区间）
+---
 
-### 方法
+## Slide 3 · 任务二 · 分类 (TSC)
 
-1. **多模型 library**：Chronos-2 + TiRex (xLSTM, 金融 niche) + Toto (observability niche) + Time-MoE + Sundial + Timer-S1 + TimesFM-2 + Moirai + Moirai2，每个模型有 **能力卡 (Model Card)** 描述假设/强项/弱项
-2. **Curator Agent** 做诊断：N、季节性、平稳性、频域熵 → 25-d 特征向量
-3. **Bayesian Routing Framework**：
-   - 静态 prior π_k = 1/CRPS_val 归一
-   - 后验 p(M_k | x) ∝ exp(-CV_loss / σ²) · π_k
-   - L0/L1/L2 三层分层：快通道 single-model → 集成 → softmax 混合
-4. **Memory layer**：反事实存储 + 多样性检索（避免 default-collapse）
-5. **Online adaptation**：Thompson Sampling contextual bandit，部署中持续 update belief
+- **输入**：few-shot（每类 3–10 样本）单/多变量；输出类别。
+- **模型库（10 个）**：Rocket / MiniRocket / WEASEL / Catch22 / MOMENT(1nn/lr) / Mantis(1nn/lr) / DTW / Euclid。
+- **决策**：训练集内 CV + 少样本兜底（每类 <7 时强制默认，CV 不可信）。
+- **工程结论（绝对/上界，基于 22 数据集先验）**：
+  - 默认 Rocket 绝对准确率 **86.1%**；**oracle 上界 90.2%** → **理论路由增益上界 +4.1pp**。
+  - 模型库大小决定头寸：5 模型时 Rocket 在 71% cell 最优；**10 模型时降到 38%**（MiniRocket/WEASEL 接管）。
+  - → **工程含义：扩模型库是提升头寸最直接的手段。**
 
-### 参考范式
+---
 
-| 工业实践 | 学术 SOTA |
+## Slide 4 · 任务三 · 机械诊断 (Anomaly + RCA)
+
+- **输入**：振动/电流/温度时序（+ 可选维修文本）；输出 异常 + 故障类型 + 严重度。
+- **方法**：规则基线兜底 + LLM Agent 结构化根因推理（LLM 不做预测，只做诊断+解释）。
+- **工程结论（绝对/双面）**：
+  - 合成 4-class 故障：默认 Rocket 绝对 **50.6%**，oracle 上界 52.0%（**理论增益上界仅 +1.4pp** → 该域路由头寸小，宜守默认）。
+  - 根因(RCA)：结构化 Agent 比无结构 LLM **+40pp**；但对工程规则基线 **−37pp** → **保留规则基线，LLM 提供可解释根因而非取代规则**。
+  - OOT（未知故障）检测：abstain + 强 LLM + 数据集先验 三路叠加可达 **100% recall**。
+
+---
+
+## Slide 5 · 总体模型框架
+
+> 〔此页放 AI 生成的模型总览图 —— 占位，后续替换〕
+>
+> ```
+> ┌─────────────────────────────────────────────────────────┐
+> │                                                           │
+> │            [ 模型框架总览图 · 占位 ]                       │
+> │      (使用本页下方提示词由 AI 生成后插入)                  │
+> │                                                           │
+> └─────────────────────────────────────────────────────────┘
+> ```
+>
+> 五阶段流水线（文字版，供对照）：
+> ① 诊断/编码 → ② 信念+可信度估计（该不该换） → ③ 决策（用默认/换模型/集成/求助LLM）
+> → ④ 执行（永不伤默认） → ⑤ 解释（决策依据可审计）
+
+---
+
+## Slide 6 · 难点
+
+| 难点 | 工程表现 | 应对 |
+|---|---|---|
+| **默认模型已很强（饱和）** | 强 base 在 71–75% cell 上即最优，路由头寸 <5pp | 检测饱和→守默认，不硬路由 |
+| **逐 cell 最优模型难预测** | 换模型常"换错"，离线选不准 | 强阈值门控 + 只在高把握偏离 |
+| **置信度不可信** | 模型"越自信越容易错" | 用 conformal 可信度替代裸置信度 |
+| **极少样本** | 每类 <7 时 CV 噪声大、误判 | N-条件兜底，退回默认 |
+| **数据评估易作弊** | 记忆若用测试信息→虚高 +1.5pp | 严格留一/只用训练侧（已审计修正）|
+
+> 核心工程原则：**系统永不显著伤害默认模型**——最差也就是"等于直接用 Chronos-2/Rocket"。
+
+---
+
+## Slide 7 · 可行性（硬件 / 部署）
+
+| 维度 | 需求 |
 |---|---|
-| GE Predix / Siemens MindSphere（ARIMA + 季节分解）| Chronos / Chronos-2 (Amazon 2024-25) — T5 类 TSFM |
-| Amazon SageMaker DeepAR（自回归 RNN）| TimesFM-2.0 (Google ICLR 2025) — decoder-only TSFM |
-| Uber Orbit / Prophet（Bayesian 状态空间）| Moirai / Moirai 2.0 (Salesforce ICML 2024) — masked Transformer |
-| | TiRex (NX-AI 2025) — xLSTM zero-shot |
-| | GIFT-Eval benchmark：Timer-S1 (ByteDance 8.3B MoE) 当前榜首 |
-
-**我们的定位**：
-- **不训练新模型**，做 **router over library**
-- 比 single-TSFM 路线更鲁棒：oracle gain +5.24%（已实测）
-- 比 hand-coded ensemble (Uber Orbit) 更原理化：Bayesian posterior 替线性池
-
-### 难点 / 缺陷分析
-
-- **TSFM Saturation Hypothesis (F1)**：当 base model 与 ground truth 协方差 → 1，所有 wrapper 改进上界仅 **2.43%** (实测)
-- **库扩张边际收益递减 (F2)**：5-way oracle == 3-way oracle (-5.24%)，加无关 niche 的 TSFM 零边际贡献
-- **Niche 互补性 >> 模型数量 (F3)**：选型应先问 training corpus 与目标域 KL 距离，后问参数量
-- **Soft mixture 在 saturation 域 NEGATIVE (F6)**：softmax 集成不优于 hard top-1
-- **CV instability at low N (F7)**：N≤5 时 LOO CV 与 test winner Spearman ρ<0.3 → 必须 fallback 到 robust default
+| **CPU-first** | Chronos-2 / Rocket / MiniRocket / WEASEL / Mantis：单 cell **亚秒~十几秒**，纯 CPU 可跑 |
+| **GPU（可选）** | 仅 8B 级大 TSFM（Timer-S1 等）需消费级 GPU；实测 2× RTX 5070 Ti(16GB) 足够 |
+| **内存/显存** | 边缘可部署轻量库（Rocket+MiniRocket+Euclid 全 CPU）；大 TSFM 走远程 |
+| **LLM** | DeepSeek（开源/免费 API，带磁盘缓存，重复零成本）；可换本地 Ollama |
+| **依赖** | conda 单环境；模块正交可插拔（库可增删，不重训）|
+| **零样本** | 所有模型**不重新训练**，新产线接入即用 |
+| **可解释** | 每次决策输出：该不该换的依据 + 选中模型 + 反事实理由（可审计）|
 
 ---
 
-## Slide 3 · 问题二 · 时序分类 (TSC)
+## Slide 8 · 关键数值锚点（绝对 / 上下界 / 估计）
 
-### 背景
+| 数值 | 类型 | 含义 |
+|---|---|---|
+| **86.1%** | 绝对 | 分类默认 Rocket 准确率（22 数据集先验）|
+| **90.2%** | 上界 | 分类 oracle 准确率（完美选模型天花板）|
+| **+4.1pp** | 增益上界 | 分类路由理论最大增益 |
+| **19% rel-MAE** | 增益上界 | 预测路由理论最大增益（oracle vs Chronos-2）|
+| **25% / 38% / 75%** | 估计（先验占比）| 默认模型即最优的 cell 占比：预测 / 分类(10库) / 检测 |
+| **+1.4pp** | 增益上界 | 检测路由理论最大增益（头寸小→宜守默认）|
+| **+40pp / −37pp** | 绝对（双面）| RCA Agent vs 无结构 LLM / vs 规则基线 |
+| **亚秒~十几秒** | 估计 | 主力模型单 cell CPU 延迟 |
 
-- 工业场景：故障类型识别（轴承故障 7 类 / 电网攻击多类）、产品分级（半导体 wafer 良品/次品）
-- **Few-shot 是常态**：新产线只有 N=3~10 个故障样本，模型必须冷启动
-- 多模态信号（振动 + 电流 + 温度）通常用单变量分类器并行处理
-
-### 方法
-
-1. **11-classifier library**：Rocket / MiniRocket / WEASEL (NEW SOTA +2.7pp) / Catch22 / MOMENT / Mantis / DTW / Euclidean / LLM-direct
-2. **Planner Agent** 跑 LOO/K-fold CV → 各分类器估计 acc
-3. **Memory + 反事实**：每 case 存 `{all_clf_accs: {clf: test_acc}}` 完整字典（非只存 winner），avoid hindsight bias
-4. **1/CRPS-style weighted vote**：每邻居为**全部** classifier 按 `sim × 1/(1-acc+ε)` 投票
-5. **Domain prior**：工业振动域（acf_decay 高 + 离散水平少）自动 boost Euclidean (Wafer N=5 实测 0.965，超 Rocket 0.815)
-6. **B7 Router**：CV + Memory + Domain prior 三路融合 → **+0.89pp 击败 Rocket** (现 SOTA)
-
-### 参考范式
-
-| 工业实践 | 学术 SOTA |
-|---|---|
-| NI LabVIEW / OSIsoft PI-AF（阈值 + 状态机）| Rocket / MiniRocket (Dempster 2020-21) — 随机卷积 + ridge |
-| MATLAB Predictive Maintenance Toolbox（FFT + SVM）| HIVE-COTE 2.0 (Middlehurst 2021) — 5 分类器 ensemble |
-| Edge ML on PLC（Decision Tree / kNN）| WEASEL (Schäfer 2017) — 实测 **NEW SOTA +2.7pp** |
-| | MOMENT / Mantis (CMU 2024 / Paris 2026) — TSFM embedding + linear probe |
-| | UCR / UEA archive — 标准对比集 30+ datasets |
-
-**我们的定位**：
-- 11-classifier library 全收 + Bayesian Router
-- 击败 Rocket SOTA **+0.89pp** (B7v3，我们)
-- 跨 task 复用同一 Router framework（forecasting / TSC 一套接口）
-
-### 难点 / 缺陷分析
-
-- **N<7 catastrophic (F7)**：LOO CV 给 BeetleFly N=3 -25pp、BirdChicken N=3 -20pp → 必须 hard fallback
-- **多 classifier ensemble NEGATIVE (F6)**：所有 β ∈ {1,3,5,10,20,50,100} soft router 均 -3pp~-4.4pp 输 Rocket-alone
-- **Memory hindsight bias (F5)**：朴素 top-K 检索自我强化 default 单峰 → memory 永远不 record 反例
-- **跨数据集 generalization gap**：Meta-Router LODO CV cell label-match 仅 44.6% → online learning 远期方向
+> 说明：以上为**测试阶段**基于现有公开数据集先验的估计，工程上界用于评估"路由最多能带来多少"，
+> 后续随模型库/数据扩展会更新。
 
 ---
 
-## Slide 4 · 问题三 · 根据时序判断机械可能的问题 (Anomaly + RCA)
+## 附录 · 模型框架图 · AI 生成提示词（顶会论文风格）
 
-### 背景
+> 用于 Slide 5 占位图。建议生成英文标注（避免中文渲染问题），16:9，矢量论文图风格。
 
-- 工业核心刚需：从振动 / 电流 / 温度时序中**实时识别**轴承磨损、转子失衡、齿轮断齿、绝缘老化等故障
-- 不只 "是否异常"，更要 **根因 (RCA)**：故障类型 + 严重度 + 剩余寿命
-- LLM Agent 可融合**多模态 (image + numeric + 维修记录文本)** 的天然优势
-
-### 方法
-
-1. **Curator Agent** 输出 12-d 诊断（v2 含 outlier / variance）：trend / season / stat × 3 置信源
-2. **Rule baseline (B0)**：滑窗方差、IQR outlier、ADF 检验 → 兜底 deterministic 结论
-3. **LLM Agent (RCA)**：基于 Curator 输出 + Model Cards + 历史 case retrieval → 多步推理输出根因 + 置信度
-4. **A3 概率指标**：每个判断必须配 CRPS / coverage / width → 工程师可基于区间宽度决定是否需要人工干预
-5. **Counterfactual memory**：存储 "如果选了别的 classifier 会怎样"，让 Agent 学到"什么时候不该相信自己"
-
-### 参考范式
-
-| 工业实践 | 学术 SOTA |
-|---|---|
-| GE Bently Nevada / SKF @ptitude（振动 FFT + 工程师手册）| Anomaly Transformer (ICLR 2022) — association discrepancy |
-| Siemens SIMATIC Diagnostic（规则 + 设备 digital twin）| GPT4TS / Time-LLM (NeurIPS 2024) — LLM as zero-shot anomaly scorer |
-| PdMA MCEMAX（电机电流签名分析 + 阈值）| Aurora / GraphRCA (2024) — 图模型 root cause analysis |
-| NREL Wind Plant Monitoring（SCADA + 经验阈值）| HyperODE-RCA (2025) — 连续时间 ODE 根因 |
-| | **ICLR 2026 质疑**：TSFM 在异常检测上未必优于简单基线 |
-
-**我们的定位**：
-- **rule baseline + LLM Agent 混合**（非纯神经路线）
-- LLM 不做预测，做**结构化推理 + Model Card 解释**
-- 反事实记忆 (all_clf_accs) 让 Agent "学会怀疑自己"
-
-### 难点 / 缺陷分析
-
-- **TSFM 异常检测争议**：ICLR 2026 paper 质疑 TSFM 未必优于规则基线 → 必须保留 rule baseline 参照
-- **LLM "根本幻觉"**：在 RCA 上易编造不存在的故障模式 → 必须 retrieval-grounded 约束 + 工程师审核
-- **小样本 + 不平衡**：故障样本远少于正常样本（极端 1:1000+）→ 阈值微调极敏感
-- **多模态融合 cost**：视频 + 振动 + 文本同步对齐 latency 高 → 必须 **cost-aware routing**：ℒ = ForecastError + λ·(latency + VRAM + remote overhead)
-- **持续运行 drift**：设备老化、季节温度、维护周期 → 必须 **online adaptation**（Thompson Sampling contextual bandit）
-
----
-
-## Slide 5 · 统一的方法学骨架
-
-### 架构概念图（AI 生成提示词）
-
+**英文提示词（推荐直接用）：**
 ```
-A clean technical architecture diagram, isometric style, soft pastel colors,
-white background, vector-art aesthetic. Top-to-bottom data flow:
+A clean top-conference-style system architecture diagram for a machine-learning
+paper, horizontal left-to-right data flow, 16:9, white background, flat vector
+style, thin labeled arrows, muted academic palette (slate blue, teal, warm gray),
+crisp sans-serif English labels only, no photorealism.
 
-LEFT-TO-RIGHT input rail at top: three icons representing
-"raw time-series signals" — a vibration waveform, an electricity load curve,
-and a temperature thermometer with timeline.
+LEFT — input: a small multivariate time-series panel (3 stacked signal curves)
+labeled "Few-shot Series x  (N=3–100)".
 
-CENTER block "Curator Agent": a clipboard icon analyzing the series,
-emitting a small feature vector (depicted as a row of colored cells labeled
-"trend / season / stat / entropy / industrial").
+STAGE 1 box "Curator / Encoder": gear+magnifier icon, output a short feature
+vector chip labeled "z = f(x)  (trend / season / noise / complexity)".
 
-BELOW Curator, a wide horizontal layer "Embedding f_φ(x) → z":
-shows the series being mapped into a small dot cluster on a 2D
-"regime manifold" (colored Voronoi regions K=6).
+STAGE 2 box "Belief + Trust Estimator": two parallel sub-bars —
+top "Confidence  b(M|z)  (which model)",
+bottom "Trust = 1 − epistemic  (conformal)";
+plus a small dial "Saturation  ĝ(z)  (is base already enough?)".
 
-BELOW that, the central decision block "Bayesian Router":
-- left subblock "Prior π_k(z)" (stacked horizontal bars per model)
-- right subblock "Likelihood L_k(z, history)"
-- merger arrow "log π + log L" feeding into
-- a glowing center cube "Posterior p(M_k | z, h)"
-- output arrow forks into 3 modes:
-  ① argmax (single arrow)
-  ② Thompson sample (multiple dashed exploratory arrows)
-  ③ risk-min (arrow weighted by std)
+STAGE 3 central decision diamond "Policy  π(saturation, trust, shape)"
+with five labeled output arrows fanning right:
+"commit-base", "deviate", "ensemble", "explore", "defer-to-LLM".
 
-RIGHT side: model library shelf with 12 model cards labeled
-"Chronos-2 / TiRex / Toto / TimesFM-2 / Moirai / Time-MoE / Sundial /
-Timer-S1 / Rocket / WEASEL / MOMENT / Mantis".
-Selected model glows with a checkmark.
+RIGHT — a "Model Library" shelf of stacked cards:
+forecasting cards (Chronos-2, TimesFM-2, Moirai, TiRex, Timer-S1) and
+classification cards (Rocket, MiniRocket, WEASEL, MOMENT, Mantis, DTW);
+the selected card glows with a check mark.
 
-BOTTOM feedback loop: dashed orange arrow from prediction outcome
-back to "Memory + Bandit State" cylinder, labeled "observe(z, chose, loss)".
+BOTTOM — a thin feedback arrow from "Outcome" back to the estimator,
+labeled "observe (offline / online)", and an "Explainer" note card
+"decision card: why-not counterfactual + retrieved cases".
 
-Three downstream icons in a row at very bottom:
-"Forecasting (chart with confidence band)",
-"Classification (3 color buckets)",
-"Mechanical Diagnosis (gear with warning triangle)".
+THREE downstream task icons at far right bottom:
+"Forecasting (curve + confidence band)", "Classification (colored buckets)",
+"Mechanical Diagnosis (gear + warning triangle)".
 
-Style: Linear-icons mixed with subtle gradients, modern paper-figure look,
-white-and-cool-blue palette, minimal text, every arrow labeled,
-high-contrast typography (no Chinese letters in image).
+Guiding principle banner under the policy block (small text):
+"never significantly hurt the default model".
+Minimal text, every arrow labeled, high-contrast, publication-quality.
 ```
 
-### 备选简化版
+**中文备注（给你看，不进图）**：图要传达三件事——(1) 一条流水线接三任务；
+(2) 决策核心是"该不该换模型"(saturation+trust)；(3) 模型库可插拔 + 永不伤默认 + 可解释。
 
+**备选极简版提示词**（若上图太密）：
 ```
-A minimalist three-tier diagram on white background, vector style:
-
-Tier 1 (top): "Series x" — single horizontal time-series curve.
-Tier 2 (mid): "Embedding → Regime → Bayesian Posterior":
-  three connected pill-shaped boxes, labeled clearly,
-  arrow labels: z, regime r, p(M_k | x).
-Tier 3 (bot): "Decision + Observe":
-  one box outputs to a model library shelf;
-  a curved feedback arrow goes back to update Tier 2.
-
-Colors: light blue boxes, dark blue arrows, gray library shelf,
-orange feedback arrow. No clutter, paper-figure quality.
-```
-
-### 数据流（文字版）
-
-```
-Series
-  ↓
-Curator Agent: 诊断 + 25-d 特征向量
-  ↓
-Embedding f_φ(series) → z   ← Phase 4: frozen TSFM encoder (MOMENT)
-  ↓
-RegimeAssigner: k-means → regime label   ← 替代 dataset 名
-  ↓
-Bayesian Router:
-  log π_k(z) + log L_k(z, history)
-  decide ∈ {argmax, Thompson, risk_min}
-  ↓
-执行 + Observe outcome → update bandit state
+A minimalist 3-tier ML system diagram, white background, flat vector, 16:9,
+English labels. Tier 1 "Series x → Encoder z". Tier 2 "Belief + Trust + Saturation
+→ Policy π" (one rounded box). Tier 3 "Model Library shelf → selected model →
+{Forecasting, Classification, Diagnosis}". A dashed feedback arrow loops outcome
+back to Tier 2. Three colors only (blue boxes, gray shelf, orange feedback arrow),
+clean publication figure quality, no clutter.
 ```
 
 ---
 
-## Slide 6 · 工业部署关键指标
+## 附录 · 每页讲稿（口语化）+ 术语解释
 
-| 指标 | 为什么重要 |
-|---|---|
-| **CRPS / pinball** | 工程决策需要置信区间，不只点估计 |
-| **80% coverage** | 区间校准（覆盖率 = 区间宽度 / 真值落入比例）|
-| **latency + VRAM** | 边缘部署约束（树莓派 4GB vs A100 40GB 模型库差 5×）|
-| **online regret** | bandit 收敛速度，反映 drift 适应能力 |
-| **interpretability** | Model Card 渲染到 LLM prompt → 决策可审计 |
+> 给演讲者照着念的逐页口语稿；每页末尾解释当页出现的术语。
+
+### Slide 1 总览 · 讲稿
+"我们先说为什么做这件事。工业上经常遇到三种'新'——新产线、新工艺、新换的传感器，它们一接上来就要能用，
+没时间为每个场景重新训练模型，这叫**零样本**。而且工业关心的是**长视野预测**，要预测很远。
+问题是：现在最火的时序基础模型（TSFM），换个领域表现差很多——比如在天气数据上 Chronos-2 是最强的，
+但到了汇率、电力数据上，它比那些专门做这个领域的模型差 35% 到 44%。所以**没有一个模型通吃**。
+还有一点，工厂要的不是一个干巴巴的预测数字，而是'预测值正负多少'这个区间，所以我们更看 CRPS 这个指标。
+我们的思路就是：不造新模型，而是搭一套**会自己挑模型**的系统——先诊断这条数据，判断该不该换模型，
+在一个模型库里挑，而且保证一条底线：**永远不会比直接用默认模型更差**。三个任务都用这一套流程。"
+- **术语**：*TSFM*=时序基础模型（像 GPT 那样预训练好、能直接用的时序大模型）；
+  *zero-shot 零样本*=不用本场景数据训练，直接拿来用；*SOTA*=当前最好水平；
+  *CRPS*=连续排序概率分数，衡量"预测的概率分布准不准"，比只看点误差(MAE)更全面；
+  *MAE*=平均绝对误差，预测值和真值差多少的平均。
+
+### Slide 2 预测 · 讲稿
+"第一个任务是预测。输入是很少的几段历史数据，输出未来一段 + 置信区间。我们手里有十几个预测模型
+（Chronos-2、TimesFM、Moirai、TiRex 这些大模型，加上传统的 ARIMA）。系统的做法是：
+拿训练数据的尾巴做个'小考'(walk-forward 验证)，只有当别的模型**明显**考得更好，才换掉默认的 Chronos-2，
+否则就守着它——因为小考样本少，容易'蒙对'，乱换反而坏事。
+结论用大白话说：默认模型在 1/4 的情况下本来就是最优的；就算我们有上帝视角每次都选对，
+最多也只能把误差再降 19%——这是**天花板**；我们实测做到的是'和默认持平、但绝不更差'。"
+- **术语**：*walk-forward 验证*=用历史数据的后半段模拟'未来'来试各模型；
+  *oracle/上界*=假设每次都选到最优模型的理想成绩，是理论天花板，实际达不到；
+  *rel-MAE*=相对误差降幅（百分比）。
+
+### Slide 3 分类 · 讲稿
+"第二个任务是分类，比如判断是哪种故障。难点是**样本极少**，每类可能就 3 到 10 个。
+我们有 10 个分类器（Rocket、MiniRocket、WEASEL、MOMENT 这些）。系统先在训练集内部交叉验证估每个的准度，
+但如果每类少于 7 个样本，交叉验证不可信，就直接用默认的 Rocket 兜底。
+关键发现：默认 Rocket 准确率 86%，如果每次都选对能到 90%，也就是路由最多帮我们提 4 个百分点。
+还有个很实用的点——**模型库越大，默认模型越不够用**：只有 5 个模型时 Rocket 在 71% 情况下最好，
+扩到 10 个模型后掉到 38%，因为 MiniRocket、WEASEL 在很多情况下接管了。所以**多放几个模型，提升空间就大**。"
+- **术语**：*few-shot 少样本*=每个类别只有很少训练样本；*交叉验证(CV)*=把训练数据轮流当测试来估准度；
+  *Rocket/MiniRocket/WEASEL/MOMENT*=不同的时序分类算法；*pp*=百分点。
+
+### Slide 4 机械诊断 · 讲稿
+"第三个任务是从振动、电流这些信号判断机器出了什么问题，不只是'有没有异常'，还要给**根因**——
+是轴承坏了还是转子失衡。我们的做法是：**规则基线兜底 + 大模型(LLM)做结构化根因分析**，
+注意 LLM 不负责预测，只负责'讲清楚为什么'。
+结论是两面的：在我们造的合成故障上，路由空间很小（最多提 1.4 个点），所以这个场景建议老老实实守默认。
+根因分析上，带结构的 Agent 比让大模型瞎猜强 40 个点，但比工程师写的规则还差 37 个点——
+所以**规则不能扔，LLM 的价值在于给出能看懂、能扩展的根因解释**，而不是取代规则。"
+- **术语**：*RCA*=根因分析（找出故障的根本原因）；*LLM*=大语言模型；
+  *规则基线*=工程师按经验写的判断规则（如阈值）；*OOT*=超出已知故障类型（遇到没见过的故障）。
+
+### Slide 5 总体框架 · 讲稿
+"这页是系统全貌（图后面补）。一句话：数据进来，先**诊断/编码**，再估两件事——
+'哪个模型可能最好'(信念)和'这次判断该不该信'(可信度)，外加'当前默认是不是已经够好'(饱和度)；
+然后**决策**：用默认、换模型、做集成、还是求助大模型；执行时守住底线**绝不比默认更差**；
+最后给一张**决策卡**说明为什么这么选，可以审计。整套换任务只换右边的模型库。"
+- **术语**：*信念(belief)*=系统估计的'各模型谁会赢'的概率；*可信度(trust)*=这次估计本身可不可靠；
+  *饱和度(saturation)*=默认模型是不是已经接近最优（越饱和越该守默认）；*集成*=多个模型结果合在一起。
+
+### Slide 6 难点 · 讲稿
+"五个真实难点，都是我们踩过的坑：①默认模型本来就强，多数情况换不动；②就算想换，'这条数据该用哪个模型'
+其实很难离线预测准；③模型给的置信度不可信，经常'越自信越错'，所以我们改用 conformal 这种更靠谱的可信度；
+④样本太少时交叉验证会骗人，必须兜底；⑤评估时一不小心就会'作弊'（用到测试信息），我们专门审计修正过。
+贯穿所有的工程铁律是这句：**系统永远不会明显比默认模型差**，最坏也就是'等于直接用 Chronos-2 或 Rocket'。"
+- **术语**：*饱和*=默认模型已接近最优、没多少提升空间；*conformal*=一种给预测配可靠'可信度分'的统计方法；
+  *数据泄漏*=不小心把测试答案用进了训练/决策，导致虚高。
+
+### Slide 7 可行性 · 讲稿
+"落地很现实。主力模型（Chronos-2、Rocket、MiniRocket 这些）**纯 CPU 就能跑**，单次几秒到十几秒；
+只有 80 亿参数的超大模型才需要显卡，一张消费级 5070 Ti（16G）就够，还能放远程。
+大模型用 DeepSeek 的免费 API，带缓存，重复调用不花钱，也能换成本地 Ollama。
+所有模型**不用重训**，新场景接上就用；每个决策都有可解释的依据，能审计。边缘设备可以只装轻量的几个模型。"
+- **术语**：*CPU-first*=优先用普通处理器、不强依赖显卡；*VRAM*=显卡内存；
+  *Ollama*=本地跑大模型的工具；*正交可插拔*=模块互不依赖，可单独增删。
+
+### Slide 8 数值锚点 · 讲稿
+"最后给几个可以记住的数字，分三类：**绝对值**（默认模型实际多准）、**上界**（完美选模型的天花板）、
+**估计**（基于现有数据集先验的占比）。比如分类：默认 86%、天花板 90%、所以路由最多帮 4 个点；
+预测最多帮 19%；检测只有 1.4 个点（所以那个场景别折腾）。要强调：这些是**测试阶段**的数，
+基于现在的公开数据集，随着模型库和数据扩展还会变——它们的用途是帮工程上判断'路由值不值得做'。"
+- **术语**：*绝对值/上界/估计*=三类指标口径；*先验*=基于已有数据观察到的规律；
+  *增益上界*=理论上最多能提升多少（达不到，仅作参考）。
 
 ---
 
-## Slide 7 · 可行性
-
-我们提出的 **"统一 Bayesian 时序路由框架"** 在数据、方法、工程、学术四个维度同时成立，**已在 6 个标准 benchmark + 14 UCR/UEA 数据集上完成可复现实证**。
-
-### 数据 & 实证基础
-
-- **基准覆盖**：ETTh1/h2 / ECL / Exchange / Weather / ILI 6 主流 forecasting 集，UCR/UEA 14 few-shot TSC 集
-- **完整 sweep 体量**：已跑通 162-cell 多策略对比（3 policies × 6 datasets × 3 N × 3 seeds），5-way oracle 实测 -5.24% vs base
-- **零样本**：所有方法均 **不重新训练**，仅 zero-shot TSFM + classical baseline + LLM Agent
-
-### 方法 & 理论闭环
-
-- **数学公式统一**：$\hat{M}(x, h) = \arg\max_k \log \pi_k(z) + \log L_k(z, h)$，其中 $z = f_\phi(x)$（frozen TSFM encoder）
-- **每个组件理论可证伪**：6 priors + 2 likelihoods + 3 decision modes (argmax / Thompson / risk-min) 均可独立消融
-- **NEGATIVE 发现亦可发表**：F1 TSFM Saturation Hypothesis (2.43% oracle ceiling)、F6 Soft Router 双轨 NEGATIVE、F2 库扩张收益递减 — 三个反例已具命题形式
-- **跨任务统一**：同一 BayesianRouter 抽象贯通 forecasting + TSC（feedback Round 4 §八 "Universal Routing Framework"）
-
-### 工程可复现性
-
-- 完全开源 conda + Python 栈，5 个独立 env 隔离已 documented
-- **CPU-first**：Chronos2 / Rocket / Mantis / arima 全 CPU 单 cell 亚秒级；GPU 仅 Timer-S1 等 8B 级 TSFM 需消费级 GPU (RTX 5070 Ti 16GB)
-- 模块化：Curator / Embedding / RegimeAssigner / BayesianRouter / BanditState / Memory 全部正交可替换
-- 持久化：BanditState save/load JSONL，跨 session 累积，online 自适应已闭环
-
-### 学术贡献度（论文 readiness）
-
-| 维度 | 已具备 |
-|---|---|
-| Method 节核心公式 | ✅ 单一概率决策规则 |
-| Ablation 矩阵 | ✅ 8 组件 × 3 modes 全独立开关 |
-| NEGATIVE finding 章节 | ✅ F1 / F2 / F6 三大反例 |
-| 跨任务 generalization | ✅ forecasting / TSC 同框架实证 |
-| 工业接地 | ✅ Cost-aware metric (latency + VRAM + env_penalty) 已落 |
-
----
-
-## Slide 8 · 核心 thesis
-
-> 工作的贡献**不在新 TSFM**，而在**把已有 TSFM library 重构为 principled adaptive inference system**。
-> 系统层创新（Bayesian routing + counterfactual memory + contextual bandit + learned regime representation）的可证伪边界已经画清楚 — 可消融、可复现、可扩展到任意新模型/新任务而无需重训练。
-
-每个组件都有 **学术论文支撑** + **工业级延迟实测** + **可消融**的工程实践。
-
----
-
-## 附录 A · 实测关键数字（可作锚点）
-
-| 数字 | 含义 |
-|---|---|
-| **-5.24%** | 5-way TSFM oracle gain vs Chronos-2 alone (34 cells) |
-| **+2.7pp** | WEASEL aggregate over Rocket (TSC NEW SOTA, 8-classifier sweep) |
-| **+0.89pp** | B7v3 击败 Rocket (TSC routing, 现 SOTA) |
-| **82.4%** | regime cluster purity (K=8, hand25 embedding, 34 cells) |
-| **2.43%** | wrapper-class 改进上界（TSH 实证） |
-| **0.965** | Wafer N=5 Mantis-LR 实测（超 Rocket 0.815） |
-| **162 cells** | 当前 sweep 体量 (3 policies × 6 datasets × 3 N × 3 seeds) |
-
-## 附录 B · 12 个理论化 finding (F1-F12)
-
-详见 `finish-1.md §0`，每条含 (a) 观察 (b) 实证出处 (c) 命题草稿 (d) 工程意义。
-
----
-
-**End of ppt.md**
+**End of ppt.md**（2026-06-02 · 工程导向重写；含背景 + 逐页讲稿）

@@ -235,6 +235,72 @@ def consensus_winner_inv_loss(
     return winner[0], support_ratio
 
 
+def build_cv_calibrator(memory: "ClfMemory", exclude_meta: Optional[dict] = None):
+    """#72 · 拟合全局单调 CV→E[test|CV] 校准曲线（isotonic）。
+
+    训练对 = bank 各 case 的 (cv_accs[clf], all_clf_accs[clf])，用 leave-one-cell-out
+    剔除查询 cell 自身（exclude_meta），曲线只用其它历史 cell 拟合 → 诚实无泄漏。
+
+    F-R8.8 根因：few-shot CV 在小样本饱和到 1.000，与 test 系统背离；inv-loss 投票里
+    一个 cv=1.0 的邻居拿到 1/(1-1.0)=巨权，把 router 拽离 rocket。校准把 cv=1.0 映回
+    E[test|cv=1.0]（通常 <1），压掉这种爆炸权重。
+
+    返回 callable cv->calibrated_acc；样本不足时返回恒等映射（退回未校准）。
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    for i in memory._eligible(exclude_meta):
+        c = memory._cases[i]
+        cv = c.cv_accs or {}
+        test = c.all_clf_accs or {}
+        for clf, v in cv.items():
+            if clf in test:
+                xs.append(float(v))
+                ys.append(float(test[clf]))
+    if len(xs) < 8 or len(set(xs)) < 2:
+        return lambda v: v
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        ir = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        ir.fit(xs, ys)
+        return lambda v: float(ir.predict([float(v)])[0])
+    except Exception:
+        return lambda v: v
+
+
+def consensus_winner_inv_loss_calibrated(
+    neighbors: list[tuple[float, ClfCase]],
+    calibrate,
+    k: int = 5,
+    min_vote_ratio: float = 0.6,
+    eps: float = 0.01,
+) -> tuple[Optional[str], float]:
+    """同 consensus_winner_inv_loss，但投票前先用 `calibrate` 把每个 CV acc 映到
+    E[test|cv]，权重 = sim × 1/(1 − calibrated_acc + eps)，避免 CV 饱和点的爆炸权重。
+    （#72，配合 build_cv_calibrator 的 LOCO 校准曲线使用。）
+    """
+    if not neighbors:
+        return None, 0.0
+    nbrs = neighbors[:k]
+    vote_w: dict[str, float] = {}
+    for sim, c in nbrs:
+        accs = c.votable_accs()
+        if not accs:
+            continue
+        for clf, acc in accs.items():
+            cal = min(0.999, max(0.0, calibrate(acc)))
+            w = sim * (1.0 / (1.0 - cal + eps))
+            vote_w[clf] = vote_w.get(clf, 0.0) + w
+    if not vote_w:
+        return None, 0.0
+    total = sum(vote_w.values())
+    winner = max(vote_w.items(), key=lambda kv: kv[1])
+    support_ratio = winner[1] / total
+    if support_ratio < min_vote_ratio:
+        return None, support_ratio
+    return winner[0], support_ratio
+
+
 def consensus_winner(
     neighbors: list[tuple[float, ClfCase]],
     k_min: int = 3,

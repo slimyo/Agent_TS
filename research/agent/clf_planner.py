@@ -170,6 +170,7 @@ def classification_planner(
     weighted_vote_min_ratio: float = 0.6, # v3 (task #39): 加权 vote 阈值 (覆盖 N_per_class=3 的 catastrophic mis-routes)
     vote_method: str = "topk",            # v5 (feedback Item 3): "topk" (default, top-1 weighted) | "inv_loss" (1/CRPS-style per-classifier)
     use_diverse_retrieval: bool = False,  # v5 (feedback Item 4): replace lowest-sim default-winner neighbor with highest-sim non-default alternative
+    use_cv_calibration: bool = False,     # #72 (F-R8.8 fix): isotonic CV→E[test] before inv-loss vote
     use_industrial_signature: bool = False,  # v4 (task #66): industrial-regime prior for Euclid
     default_classifier: str = DEFAULT_CLASSIFIER,
     margin: float = 0.10,
@@ -386,10 +387,20 @@ def classification_planner(
                 else:
                     neighbors = mem.query(full_vec, k=k_mem,
                                           exclude_meta=exclude_meta)
-                vote_fn = consensus_winner_inv_loss if vote_method == "inv_loss" else consensus_winner_weighted
-                mem_winner, mem_support_ratio = vote_fn(
-                    neighbors, k=5, min_vote_ratio=weighted_vote_min_ratio
-                )
+                if vote_method == "inv_loss" and use_cv_calibration:
+                    # #72: leave-one-cell-out isotonic CV→test 校准后再 inv-loss 投票
+                    from research.agent.clf_memory import (
+                        build_cv_calibrator, consensus_winner_inv_loss_calibrated,
+                    )
+                    calibrate = build_cv_calibrator(mem, exclude_meta=exclude_meta)
+                    mem_winner, mem_support_ratio = consensus_winner_inv_loss_calibrated(
+                        neighbors, calibrate, k=5, min_vote_ratio=weighted_vote_min_ratio
+                    )
+                else:
+                    vote_fn = consensus_winner_inv_loss if vote_method == "inv_loss" else consensus_winner_weighted
+                    mem_winner, mem_support_ratio = vote_fn(
+                        neighbors, k=5, min_vote_ratio=weighted_vote_min_ratio
+                    )
                 mem_support = mem_support_ratio
         else:
             # v1 路径（向后兼容）

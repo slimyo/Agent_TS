@@ -1,351 +1,352 @@
-# Method v3 — Self-Evolving Router
+# Method v3 — Self-Evolving Belief-State Routing Runtime
 
-> 版本：2026-05-29（Round 7 起）
-> 前文：`method.md` (Round 4-A) / `method2.md` (Round 5 + 6) / `feedback.md`（外部 review）
-> 配套：`finish3.md`（Round 7 实测） / `paper_draft.md`（论文）
-
----
-
-## 0. Thesis
-
-> method2 把 router 升级到 **self-adaptive runtime + decision engine**（B2/B3/E1/R6-E 自适应 + Action 层）。method3 进一步把 router 升级到 **self-evolving system**：除了 runtime 自适应，还要让模型库本身能**自我淘汰**、Prior 权重能**自我学习**，去掉 method2 中残留的手调常数。
+> 版本：2026-05-30 重构（Round 7-8 全部合并 + M8/M9 后诚实化）
+> 接续 `method.md`（Round 4-A）/ `method2.md`（Round 5-6）。**配套**：`finish3.md`（Round 7-8 实测 + Findings F-R7.x/F-R8.x）/ `feedback.md`（外部 review 11 条硬伤）/ `paper_draft.md`（论文稿）/ `plan.md`（总纲）/ `TODO.md`（权威优先级）。
+>
+> 自顶向下完整描述系统现状。每节脚注真实文件路径作代码地图。method2 把 router 升级到 *self-adaptive runtime + decision engine*；method3 进一步升级到 **self-evolving system**：模型库自我淘汰、Prior 权重自我学习、decide-mode 自我选择，并把 feedback 两条理论硬伤（fake-Bayes / factor-explosion）和唯一"致命"工程硬伤（memory 泄漏）逐条封堵。
 
 ---
 
-## 1. 与 method2 的关系
+## 0. Thesis（一句话总结）
 
-method2 §11.5 的 Round 6 后半已经做到：
-- 单次决策的 calibration + cost-min decision（B2 + E1）
-- 周期性 drift 自适应（B3 4+1 信号 + 3 动作 + refit）
-- 预算感知的 inference 调度（R6-E）
+> **任何时序任务都是 belief state `b(M | z, h, t)` 上的决策**；系统不只在运行时自适应，还要让自己的**结构参数**（模型库成员、prior 权重、decide-mode）随真实 outcome **自我演化**，去掉 method2 残留的全部手调常数。
 
-但残留两个**手调常数**：
-1. **PriorFactor 的 `strength` 常数**：`NPrior(strength=2.0)`、`IndustrialPrior(strength=2.0)`、`OperationalReliabilityPrior(strength=1.5)` 全是经验值，**无法 auto-adapt**。这与 feedback 前§2.B "Empirical Bayes" 期望直接冲突。
-2. **Model library 永久污染**：即使某个 model 在某 regime 下系统性地差，bandit 也只会让它 belief 变高（loss 大）→ 在 Thompson 模式下仍可能被采样；libraries 越长越垃圾。
+三点收敛(呼应 feedback "三层统一结构"，见 §10)：
 
-method3 (Round 7) 通过 **M2** + **M3** 两件套封堵：
+```
+  x ──► Representation z=f(x) ──► Belief b(M)=softmax(−E) ──► Decision a~π(a|b)
+        Curator 25-d + embedding   energy-based factor 组合      argmax/Thompson/risk-min
+        series_features.py          bayesian_router.py            + abstain / action layer
+        representation.py           (M8: 非 exact Bayes)          drift_engine / action_layer
+```
 
-| ID | 名称 | 解决问题 | 对应 feedback |
+**关键诚实化(M8/M9)**：
+- 旧称 "Bayesian posterior" → 改 **energy-based / belief state**（M8.1，弱化 fake-Bayes claim）。
+- 旧 TSC "+0.89pp 击败 Rocket" → 去数据泄漏后 **−0.62pp（持平）**（M9，F-R8.7）；论文价值转向"泄漏审计方法学"。
+
+---
+
+## 1. 数学公式
+
+### 1.1 决策规则（energy-based, 非 exact Bayesian）
+
+$$\hat{M}(x,h,t)=\mathrm{decide}\big(b(M_k\mid z,h,t)\big),\qquad
+b(M_k)=\mathrm{softmax}(-E_k)=\frac{\exp(-E_k)}{\sum_j\exp(-E_j)}$$
+
+$$-E_k=\sum_i \underbrace{\log\pi_k^{(i)}(z)}_{\text{prior factors}}+\sum_j \underbrace{\log L_k^{(j)}(z,h,t)}_{\text{likelihood factors}}$$
+
+| 符号 | 含义 | 来源 |
+|---|---|---|
+| $z=f_\phi(x)$ | learned embedding | `representation.py` |
+| $r(z)$ | regime label (k-means) | `RegimeAssigner` |
+| $\pi_k^{(i)}$ | 第 i 个 prior factor | `bayesian_router.py:PriorFactor` |
+| $L_k^{(j)}$ | 第 j 个 likelihood factor | `bayesian_router.py:LikelihoodFactor` |
+| $E_k$ | 候选 k 的 energy（log 量纲）| factor 加和取负 |
+| $\mathrm{decide}$ | argmax / Thompson / risk-min / auto | `BayesianRouter.decide()` + M1 meta-bandit |
+
+> **M8.1 framing 修正**：factor 非生成式、非条件独立，$b$ 不是 exact posterior。论文/method 统一写 **"factorized posterior-inspired energy model"** / **"belief state"**，不写 "exact Bayesian posterior"。`BayesianRouter` 类名仅为兼容保留。
+
+### 1.2 三个 decide mode（+ M1 自动选择）
+
+| Mode | 公式 |
+|---|---|
+| argmax | $\arg\max_k b(M_k)$ |
+| Thompson | $\tilde r_k\sim b(M_k)$；$\arg\max\tilde r_k$ |
+| risk_min | $\arg\min_k(\mathbb{E}[\ell_k]+\lambda\,\mathrm{Var}[\ell_k])$ |
+
+**M1 Meta-bandit**：把 `{argmax, thompson, risk_min}` 当 3 arm 的 meta-level bandit，`decide_mode="auto"` 时由真实 outcome 自学该用哪个 mode（取代手调常数）。
+
+### 1.3 在线更新（per-(regime,model) 高斯共轭 + M4 per-regime decay）
+
+$$n_t=d_r\,n_{t-1}+1,\quad
+\mu_t=\frac{d_r\,n_{t-1}\,\mu_{t-1}+\ell_t}{n_t},\quad
+\sigma_{\mu,t}^2=\frac{\hat\sigma^2}{n_t}$$
+
+**M4**：decay $d_r$ 从全局标量升级为 **per-regime** $d_r=\text{regime\_decay}.get(r,\text{decay})$；B3 drift 触发 `boost_exploration` 时只收紧"最近活跃 regime"的 decay（实测 fast 0.80 vs slow 0.99 适应速度差 **3.40×**，F-R8.3）。
+
+### 1.4 M3 · Empirical Bayes Prior strength（自学权重）
+
+$$r=\mathrm{Pearson}\big(\log\pi_F(\text{chosen}),\,-\text{outcome}\big),\qquad
+\text{strength}_F\leftarrow\mathrm{clip}\big(\text{strength}_F\cdot(1+\eta\,r),\,0,\,\text{max}\big)$$
+
+正相关(factor 把高 prior 给了 outcome 好的模型)→ 加强；持续负相关 → 削到 0(等价 prune)。实测 NPrior `2.000→2.246`(+12.3%, r=+0.616)。
+
+### 1.5 M8 · Factor Attribution（可解释性，问题 2）
+
+- **拆解**：$-E_k=\sum_i c_{i,k}$，重构误差 $\max_k|\sum_i c_{i,k}-(-E_k)|=0$（严格可加，F-R8.5）。
+- **LOFO**（单次决策决定性 factor）：去掉 factor $i$ 后 $\arg\max$ 是否翻转 + $\mathrm{KL}(b\,\|\,b_{-i})$ + $\Delta\text{margin}$。
+- **跨决策冗余**：centred log-term 向量跨决策求 Pearson，$|\text{corr}|\ge0.8$ 即冗余对（当前 6 forecasting factor **无**冗余对，F-R8.6）。
+
+---
+
+## 2. 系统架构（三层 belief-state runtime）
+
+```
+┌─────────────┐
+│   Series x  │
+└──────┬──────┘
+       ↓  ───────────────────────  Layer 1 · Representation ───────────────────────
+┌──────────────────────┐   curator_uq.py + series_features.py (25-d 诊断+置信度)
+│ Curator + Embedding  │   representation.py: HandFeature(25)/MOMENT(512)/Chronos2(768)
+│   z = f_φ(x)         │   RegimeAssigner: k-means(K=8) → r(z)   (purity 82.4%)
+└──────┬───────────────┘
+       ↓  ───────────────────────  Layer 2 · Belief ────────────────────────────────
+┌────────────────────────────────────────────────────────────┐  bayesian_router.py
+│ BayesianRouter — energy-based belief b(M)=softmax(−E)        │
+│   Prior factors:  Availability / CRPS / Regime / Type /      │
+│                   N / Entropy / Industrial / AnomalyType(M7) │
+│   Likelihoods:    CV / Memory(CV-acc, M9) / Representation   │
+│   Online:         BanditState[(r,M)]→(μ,σ)  + per-regime decay(M4)│
+│   Self-evolving:  M2 culling  · M3 EB-strength · M8 attribution │
+│   decide(mode) ∈ {argmax, thompson, risk_min}  ←auto by M1   │
+└──────┬───────────────────────────────────────────┬─────────┘
+       ↓                                            ↑ observe(z,chosen,loss)
+       │  ───────────  Layer 3 · Decision ──────────┤
+┌──────────────────────┐  drift_engine.py (B3: 5 signals→3 actions→refit)
+│ Decision / Action    │  action_layer.py (E1: forecast→intervention)
+│  abstain / route /   │  inference_scheduler.py (R6-E: 预算感知升级链)
+│  intervention        │  calibration.py (B2: isotonic 4-tier)
+└──────┬───────────────┘  reflective_loop.py (B1: L0→L3)
+       ↓
+┌──────────────────────┐  telemetry.py (health) → drift_history → 下一步 adaptive_decide
+│  Prediction / Action │  (闭环)
+└──────────────────────┘
+```
+
+**自演化闭环**：`adaptive_observe` 按周期触发 M2 culling（`cull_every`）/ M3 EB（`eb_learn_every`）/ B3 drift（`drift_check_every`）；drift 的 `boost_exploration` 通过 `resurrect()` 复活被淘汰模型(M2↔B3 互锁)。
+
+---
+
+## 3. 三大任务
+
+> 同一 belief-state runtime 接三类 task，区别只在候选集 $\mathcal{M}$、likelihood、decision 头。三任务**诚实结果**(post-M9)：
+
+| 任务 | Agent 角色 | 候选集 $\mathcal{M}$ | 最强 baseline | 我们最终 | 诚实差距 |
+|---|---|---|---|---|---|
+| **A Forecasting** | Chronos-2 wrapper | {chronos2, bolt, arima_ets, llmtime, tirex, toto…} | Chronos-2 | v11 parity wrapper | **0%**（CRPS, Wilcoxon p=0.32）|
+| **B TSC** | router | {rocket, moment_1nn/lr, dtw_1nn, euclid_1nn} | Rocket-alone | B7v3(router+memory, 去泄漏) | **−0.62pp**（持平；泄漏前虚高 +1.51pp）|
+| **C Anomaly+RCA** | 结构化根因 | {rule, residual detector} + fault-type prior | LLM-direct / B0-rule | Curator+Cards | **+40pp** vs LLM-direct（但 −37pp vs 规则，诚实负结果）|
+
+### 3.1 Track A · Forecasting（`agent/forecaster_reflect.py`）
+
+```
+(train,val,H,diag,dataset) → z=embed → regime → BayesianRouter.decide
+  ├─ N<15 → NPrior 把 chronos2 拉到 0.9（v10 fallback）
+  ├─ walk-forward CV → CVLikelihood softmax(−cv/τ)
+  ├─ entropy gate (v12) → 高 spread 时提高偏离 margin
+  ├─ L1 单模型(0 cost) / L2 quantile linear pool
+  └─ memory safety-net(v11) 仅强支持时偏离 → observe(actual_mae)
+```
+最终 v11 = **0W/1L/23T MAE, CRPS 0%** = guaranteed parity（三机制 memory/entropy/abstain 都收敛到 C2 均值，TSH 直接证据）。
+
+### 3.2 Track B · TSC（`agent/clf_planner.py`）
+
+```
+(X_tr,y_tr,X_te,dataset,seed) 
+  ├─ N_per_class<7 → force rocket (B7v2 fallback, +0.87pp 回血)
+  ├─ LOO/k-fold CV → cv_accs   (M9: 只有 cv_accs 可投票)
+  ├─ margin gate: best_other−rocket≥0.10 → 偏离
+  ├─ memory: featurize_cell→z-score→L2; query_diverse(exclude_meta=LOCO)
+  │          consensus_winner_inv_loss 用 votable_accs()(=cv_accs)
+  └─ predict_with(chosen)
+```
+**M9 去泄漏后**：86.91% / −0.62pp，路由 `rocket15/moment10/euclid4/dtw1`（本轮重跑复现，见 finish3 §8）。
+
+### 3.3 Track C · Anomaly + RCA（`agent/anomaly.py` + `agent/rca.py`）
+
+M7 Phase 1：`AnomalyTypePrior`(3 统计特征 level_shift_z / variance_ratio / max_outlier_z) + 2 轻量 detector（rule + residual），softmax 出 `{fault_type, score}`，4/4 故障类型正确识别(F-R7.3)，**不引入深度模型 / LLM**。Phase 2(per-fault memory)/Phase 3(LLM RCA)为预留接口。
+
+---
+
+## 4. 模型库
+
+### 4.1 Forecasting（12 models / 16 cards · `baseline/` + `agent/model_cards.py`）
+
+| 类别 | 模型 | params | env |
 |---|---|---|---|
-| **M1** | Meta-bandit on decide_mode | `decide_mode="argmax"` 是手调常数 | 前§2.C "Meta-bandit" |
-| **M2** | Model 自动淘汰 | model library 永久污染 | 前§4 表 "Model 淘汰机制" |
-| **M3** | Empirical Bayes Prior strength | 手调常数 + Prior 权重不自适应 | 前§2.B "Empirical Bayes" |
-| **M4** | Per-regime bandit decay | global decay 把 hot/cold regime 一刀切 | 前§2.C "Per-regime decay" |
+| trivial point | naive_drift, naive_seasonal, arima_ets, llmtime | <1M / LLM | tsci |
+| Chronos family | chronos(60M), chronos_bolt(200M), **chronos2(120M, default)** | 60-200M | tsci |
+| TSFM 主流 | timesfm2(500M), moirai(311M), moirai2(11M) | 11-500M | tsci/py312 |
+| niche specialist | tirex(128M xLSTM), toto(151M observability), toto2(4M) | 4-151M | tsci/py312 |
+| remote large | time_moe(50M), sundial(128M), timer(8.3B MoE) | 50M-8.3B | tsci-remote(-tx440) |
+
+每模型 5 字段 card：class / assumes / strengths / weaknesses / typical_failure。
+
+### 4.2 TSC（`baseline/tsc_classical.py` + `agent/clf_strategies.py`）
+
+distance(dtw_1nn, euclid_1nn) · kernel(**rocket default**, minirocket) · TSFM-embed(moment_1nn, moment_logreg, mantis_*) · dictionary(weasel) · feature(catch22) · LLM(llm_direct)。
+
+### 4.3 Anomaly detectors（`agent/anomaly.py`）
+
+rule_baseline · residual_score（站位 Anomaly-Transformer，Phase 2 可替换）+ `AnomalyTypePrior`(strength 由 M3 EB 学)。
 
 ---
 
-## 2. M1 · Meta-bandit on decide_mode
+## 5. 数据集
 
-### 2.1 设计 (M1)
+### 5.1 Forecasting（6 数据集 × N∈{10,20,50,100} × 3 seeds）
 
-> 把 `{argmax, thompson, risk_min}` 当作 3 个 arm 的 meta-level bandit。每次决策 `select_mode(meta_state)` 选 mode；观察到 outcome 后 `meta_state.observe(mode_used, outcome)` 更新 Gaussian conjugate (n, s, sq)。冷启动期 round-robin 填 `cold_start_K` 个 obs/mode，之后 Thompson sample 持续 explore。
+| Dataset | Sampling | Len | H | m | 用途 |
+|---|---|---|---|---|---|
+| ETTh1/ETTh2 | 1h | 17,420 | 96 | 24 | 主表 |
+| ECL(MT_001) | 1h | 26,304 | 96 | 24 | TSFM coverage |
+| Exchange(rate_0) | 1d | 7,588 | 96 | 7 | low-coverage |
+| Weather(OT) | 10min | 52,696 | 96 | 144 | OOD memory 测试 |
+| ILI(OT) | 1w | 966 | 24 | 52 | 量纲极端 |
 
-```
-RouterConfig.decide_mode = "auto"        ──► adaptive_decide
-                                              │
-                                              ▼
-                                       select_mode(state.meta_bandit, cfg)
-                                              │
-                                              ▼
-                          mode ∈ {argmax, thompson, risk_min}
-                                              │
-                                              ▼
-                              router.decide(ctx, ev, mode=mode)
-                                              │
-adaptive_observe(state, plan, outcome) ─────► meta_bandit.observe(mode, outcome)
-```
+### 5.2 TSC（UCR univariate + UEA multivariate · `datasets/ucr`、`datasets/uea`）
 
-### 2.2 状态
+- **UCR-5 核心**：Coffee / ECG200 / TwoLeadECG / BeetleFly / BirdChicken（N_per_class∈{3,5,10}×2 seeds=30 cells）
+- **扩展(less-saturated)**：GunPoint / Strawberry / Wafer / ECG5000 / Crop / FordA/B
+- **UEA 多变量**：BasicMotions / ERing / AtrialFibrillation（DTW>Rocket 反转，更大 routing space）
 
-`state.meta_bandit_dict` 持久化（save/load round-trip）。包含 `decay` + `prior_mu/var/n` + `counts: dict[mode → (n, s, sq)]`。
+### 5.3 Synthetic 4-class fault + RCA cells
 
-### 2.3 触发开关
+ETTh1/ECL 注入 {normal, trend_break, seasonal_break, outlier_burst}；RCA 自然失败 30-50 cells（从 forecasting catastrophic 选）。
 
-新增 `RouterConfig` 旋钮：
+---
 
-| 名称 | 默认 | 作用 |
+## 6. 自演化模块 M1-M9（Round 7-8）
+
+| ID | 名称 | 解决的手调常数 / 硬伤 | 文件 | 实测 |
+|---|---|---|---|---|
+| **M1** | Meta-bandit on decide_mode | `decide_mode` 手选 | `meta_bandit.py` | thompson 60步→83.3% / 200步→92% (F-R8.1/8.2) |
+| **M2** | Model 自动淘汰 + EliminationPrior | model library 永久污染 | `model_culling.py` | per-regime μ 排序淘汰底部，protect+min_keep 互锁 |
+| **M3** | Empirical Bayes prior strength | `strength` 经验常数 | `prior_learning.py` | NPrior 2.0→2.246 (§1.4) |
+| **M4** | Per-regime bandit decay | global decay 一刀切 | `bandit.py`+`drift_engine.py` | fast/slow 适应差 3.40× (F-R8.3) |
+| **M7** | Anomaly Phase 1 | (新任务，最小闭环) | `anomaly.py` | 4/4 故障类型识别 (F-R7.3) |
+| **M8** | Factor Attribution + framing | 问题 1 fake-Bayes + 问题 2 黑盒 | `bayesian_router.py` | 重构误差 0；无冗余对 (F-R8.5/8.6) |
+| **M9** | Memory 去泄漏 | 问题 6 致命泄漏 | `clf_memory.py`+`clf_planner.py`+`build_clf_memory_v2.py` | +1.51pp 泄漏挤出；88.42%→86.91% (F-R8.7/8.8/8.9) |
+
+**M9 两类泄漏修复**：(A) value 泄漏——投票权重从 test-acc 改 **训练集内 CV**（`votable_accs()` 只返 `cv_accs`，test 降级 AUDIT ONLY）；(B) self-membership——`exclude_meta` 按 `{dataset,N,seed}` **leave-one-cell-out** 剔除查询 cell 自身。
+
+### 6.1 RouterConfig 新增旋钮
+
+| 旋钮 | 默认 | 作用 |
 |---|---|---|
-| `meta_bandit_enable` | False | 显式开关 |
-| `decide_mode="auto"` | — | 等价于 `meta_bandit_enable=True` |
-| `meta_bandit_cold_K` | 10 | 冷启动每 arm 至少观测 N 次 |
-| `meta_bandit_selection` | `"thompson"` | 或 `"greedy"` |
-| `meta_bandit_decay` | 0.995 | 老 obs 指数衰减 |
-
-### 2.4 与 §1.2 三个 decide mode 的关系
-
-method2 §1.2 把这 3 个 mode 设计成"用户选一个 + 文档说明各自适用场景"。M1 把"用户选"自动化掉 —— 系统按真实 outcome 自学应该用哪个 mode；扰动来时（B3 drift 触发）可清空 meta_bandit 让其重新 explore（后续可加）。
+| `cull_every` / `cull_fraction` / `cull_min_keep` / `cull_protect` | 200 / 0.15 / 2 / (naive_drift,chronos2) | M2 |
+| `eb_learn_every` / `eb_lr` / `eb_max_strength` / `eb_min_samples` | 100 / 0.05 / 5.0 / 30 | M3 |
+| `meta_bandit_enable` / `decide_mode="auto"` / `meta_bandit_cold_K` / `meta_bandit_decay` | False / — / 10 / 0.995 | M1 |
 
 ---
 
-## 3. M2 · Model 自动淘汰
+## 7. 远程模型 / 部署矩阵
 
-### 3.1 设计 (M2)
+### 7.1 5 个 conda env
 
-> 每 `cull_every` 次决策后，按 per-regime belief μ 排序模型，淘汰底部 `cull_fraction` 的"差模型"。被淘汰的 `(regime, model)` 对在后续 router 决策中通过 `EliminationPrior` 硬屏蔽（log_prior = -∞）。
+| Env | python | torch | transformers | 用途 |
+|---|---|---|---|---|
+| `tsci`(local main) | 3.10 | 2.x cu118 | 4.45+ | 8/12 forecasting + 全部 TSC（本地主力，CUDA 可用）|
+| `tsci-py312`(local) | 3.12 | 2.5+ | <4.46 | moirai2 / toto2（uni2ts 2.0）|
+| `tsci-tx440`(local, deprecated) | 3.10 | 2.x | 4.40.1 | 旧 time_moe/sundial 回归 |
+| `tsci-remote`(`c220@10.192.43.66`) | 3.9 | 2.8.0+cu128 | **4.57.1** | Timer-S1（Blackwell sm_120）|
+| `tsci-remote-tx440`(远程) | 3.9 | 2.8.0+cu128 | **4.40.1** | time_moe / sundial（旧 API）|
 
-```
-state.bandit._state[(regime, model)] = (n, s, sq)
-        │
-        ▼
-cull_models(state, config):
-    for each regime r:
-        rank models by μ = s/n  (lower = better)
-        eligible = {m : n_r,m ≥ min_observations  AND  m ∉ protect}
-        cull bottom ⌈fraction × |eligible|⌉
-        guard: keep_at_least min_keep models per regime
-        state.culled.setdefault(r, set()).update(culled)
-```
+### 7.2 远程 SSH + sweep
 
-**约束**（互锁防止单点全挂）：
-- `min_keep_per_regime ≥ 2`：保证至少有 2 个候选
-- `protect: tuple[str]`：永远不淘汰（如 `naive_drift` 兜底 + `chronos2` 默认）
-- `min_observations`：未观察够的模型不淘汰（避免冷启动误杀）
-- 可选 **resurrection**：被淘汰 model 在 K 次决策后或 `drift_engine` 触发 `boost_exploration` 时自动复活
+```bash
+ssh c220@10.192.43.66          # 2× RTX 5070 Ti 16GB, sm_120 ; 密码 cinter
+# workdir /data2/c220/hz/agent_ts/ ; HF cache /data2/c220/hz/hf_cache/ + HF_ENDPOINT=https://hf-mirror.com
 
-### 3.2 EliminationPrior
-
-```python
-@dataclass
-class EliminationPrior(PriorFactor):
-    state_ref: object = None
-    log_factor: float = -50.0   # 实际等价于 -∞，但保持数值稳定
-
-    def log_prior(self, candidates, ctx):
-        regime = ctx.features.get("regime") if ctx.features else None
-        culled = getattr(self.state_ref, "culled", {}).get(regime, set())
-        return {m: (self.log_factor if m in culled else 0.0) for m in candidates}
+# 本地 rsync 代码+cells → 远程跑 → 拉回 *_vs_c2.jsonl
+sshpass -p cinter rsync -az research/scripts/remote_sweep.py c220@10.192.43.66:/data2/c220/hz/agent_ts/research/...
+ssh c220@10.192.43.66 'conda activate tsci-remote-tx440 && cd /data2/c220/hz/agent_ts && \
+   HF_HOME=/data2/c220/hz/hf_cache HF_ENDPOINT=https://hf-mirror.com python research/scripts/remote_sweep.py time_moe'
+sshpass -p cinter rsync -az c220@10.192.43.66:.../results/time_moe_vs_c2.jsonl research/results/
 ```
 
-### 3.3 集成 (M2)
+### 7.3 Cross-env routing（future）
 
-- `adaptive_observe` 在 `n_observations % cull_every == 0` 时调一次 `cull_models`
-- `adaptive_decide` 将 regime 写入 `ctx.features["regime"]` 供 EliminationPrior 消费
-- `state.culled: dict[int, set[str]]` 加入 `RouterState` 持久化
+当前单 plan 不能跨 env 调模型；`allow_remote=True` 仅离线把远程模型的 $\pi_k$ 纳入本地 prior。在线需 subprocess dispatcher（paper §5.4 future work）。
 
 ---
 
-## 4. M3 · Empirical Bayes Prior Strength
+## 8. 评估指标
 
-### 4.1 设计 (M3)
-
-> 不假设 prior strength 是固定常数；从 `state.telemetry` 的 (log_prior_F(chosen), outcome) 关系里**学**每个 prior 的有效权重。Pearson 正相关 = factor 有用 → 加强；负相关 = factor 反向 → 削弱。
-
-```
-for each PriorFactor F with .strength attribute:
-    collect (xs, ys):
-        xs = log_prior_F(chosen)   from prior_contribs[F.name][chosen]
-        ys = -outcome               higher = better
-    r = Pearson(xs, ys)
-    F.strength ← clip(F.strength · (1 + lr · r), 0, max_strength)
-```
-
-直觉：
-- F 把高 log_prior 分配给最终 outcome 好的 model → `r > 0` → strength 升
-- F 持续推荐 outcome 差的 model → `r < 0` → strength 降到 0（事实上 prune 该 factor）
-- 训练样本不足时（< `min_samples`）不更新
-
-### 4.2 边界 + 安全
-
-- 只学有 `strength` 属性的 PriorFactor（NPrior / IndustrialPrior / OperationalReliabilityPrior 等）
-- `r` 用 winsorize 防止极端 outcome 主导
-- `lr` 默认 0.05，max_strength 默认 5.0
-- 持久化：把学到的 strengths 写入 `state.learned_prior_strengths: dict[name, float]`，下次 `adaptive_decide` 构 prior 时读取
-
-### 4.3 集成 (M3)
-
-- `adaptive_observe` 在 `n_observations % eb_learn_every == 0` 时调 `learn_prior_strengths(state, router)`
-- `state.learned_prior_strengths` 加入 `RouterState` 持久化
-- `adaptive_decide` 构 prior 时读取 `state.learned_prior_strengths.get(name, default)` 覆写常数
-
----
-
-## 4.5 M4 · Per-regime bandit decay
-
-> `BanditState.decay` 原本是全局标量，所有 (regime, model) 共享。问题：热门 regime 大量更新会快速冲淡冷门 regime 的有效样本数；扰动来时也只能整体调节。M4 让每个 regime 拥有独立 decay。
-
-### 4.5.1 设计
-
-```python
-class BanditState:
-    decay: float = 1.0                 # 全局 fallback
-    regime_decay: dict = {}            # {regime → decay}, empty = 用 scalar
-    def _effective_decay(self, r):
-        return self.regime_decay.get(r, self.decay)
-    def observe(self, regime, model, loss):
-        d = self._effective_decay(regime)
-        if d < 1.0: n*=d; s*=d; sq*=d
-        ...
-    def set_regime_decay(self, regime, decay):  # clip to (0,1]
-        ...
-```
-
-### 4.5.2 与 B3 drift 联动
-
-`drift_engine.apply_actions` 在 `boost_exploration` 触发时自动收紧最近 30 条 telemetry 中出现的 regime 的 decay：
-
-```python
-tighten_to = max(0.85, 1.0 - 0.10 * a.magnitude)
-for rg in recent_regimes:
-    bandit.set_regime_decay(rg, min(current, tighten_to))
-```
-
-效果：扰动只让 "正在被使用" 的 regime 加速遗忘，**不影响安静的 regime** —— 解决了 feedback 前§2.C 的核心痛点。
-
-### 4.5.3 持久化
-
-`BanditState.save/load` 序列化 `regime_decay` 字段（meta 行新增 `"regime_decay": {str → float}`）。
-
----
-
-## 5. RouterConfig 新增旋钮
-
-| 名称 | 默认 | 作用 |
-|---|---|---|
-| `cull_every` | 200 | 每 N obs 调一次 `cull_models` |
-| `cull_fraction` | 0.15 | 每次淘汰底部多少比例 |
-| `cull_min_keep` | 2 | 每 regime 最少保留模型数 |
-| `cull_protect` | `("naive_drift", "chronos2")` | 永不淘汰的模型 |
-| `cull_min_observations` | 5 | 模型在该 regime 至少观察过几次才能被淘汰 |
-| `eb_learn_every` | 100 | 每 N obs 学一次 prior strengths |
-| `eb_lr` | 0.05 | Empirical Bayes 学习率 |
-| `eb_max_strength` | 5.0 | strength 上界（防止数值爆炸）|
-| `eb_min_samples` | 30 | 至少 N 条带 outcome 的 telemetry 才学 |
-| `meta_bandit_enable` | False | M1: 启用 meta-bandit（`decide_mode="auto"` 等价）|
-| `meta_bandit_cold_K` | 10 | M1: 冷启动每 arm 最少观测次数 |
-| `meta_bandit_selection` | `"thompson"` | M1: `"thompson"` 或 `"greedy"` |
-| `meta_bandit_decay` | 0.995 | M1: 老 obs 指数衰减 |
-
----
-
-## 6. 与 §11.5 (method2) 的关系
-
-| method2 §11.5 节 | method3 接续 |
+| 任务 | 指标 |
 |---|---|
-| 11.5.3 Drift Engine（5 信号 / 3 动作）| M2 culling 在 drift_engine 触发 `boost_exploration` 时清空 culled（resurrection），实现"扰动来时重新探索"|
-| 11.5.4 Action Layer（cost-min）| 不变 |
-| 11.5.5 Inference Scheduler（utility）| 被 culled 的模型从 candidates 移除，自动减少 scheduler 待选 |
-| §3.4 BayesianRouter 6 priors | M3 让其中带 strength 的几个 prior 权重 self-tune |
+| Forecasting | MAE / **CRPS** $\approx\sum_\ell\frac{2}{|Q|}(\alpha_\ell-\mathbb{1}[y<q_\ell])(q_\ell-y)$ / pinball / 80%-coverage / width |
+| TSC | Accuracy / Macro-F1 / routing trace / Oracle gap |
+| RCA | R1 Top-1 / R2 Top-3 / R4 keyword-F1 / OOT recall |
+| Risk / Cost | $\text{risk}_k=\mathbb{E}[\ell_k]+\lambda\,\text{std}[\ell_k]$ ; $c_k=\alpha\log\text{lat}+\beta\log\text{params}+\gamma\,\text{env\_penalty}+\delta\log\text{VRAM}$ |
 
 ---
 
-## 7. 实测与 Findings → `finish3.md`
+## 9. 配置旋钮（核心）
 
-Round 7 全部实测 + Findings 写在 `finish3.md`。本文件只承担方法描述。
-
----
-
-## 8. M7 · Anomaly Detection Phase 1（feedback 前§5 务实版）
-
-> Phase 1 显式不做：LLM RCA / 新 Memory / Anomaly-Transformer 论文模型本体。本节只装最小可跑闭环。Phase 2/3 留给后续 round。
-
-### 8.1 设计 (M7)
-
-```
-window  ──►  AnomalyTypePrior.compute(window) ──► {fault_type → prior}
-        │                                              │
-        ├──►  RuleBaselineDetector.detect(window) ──┐  │
-        │                                            │  │
-        ├──►  ResidualScoreDetector.detect(window) ─┤  │
-        │       (站位 "Anomaly-Transformer"，无需   │  │
-        │        深度模型，Phase 2 可替换)           │  │
-        │                                            ▼  ▼
-        └────────────────────►   detect_anomaly  ──► AnomalyResult
-                                  (softmax over             ├─ is_anomaly
-                                   detector scores)         ├─ score
-                                                            ├─ suspected_type
-                                                            ├─ detector
-                                                            ├─ type_prior
-                                                            └─ detector_posterior
-```
-
-### 8.2 AnomalyTypePrior 规则
-
-| Fault type | 触发条件 | 输入特征 |
+| Var | 取值 | 作用 |
 |---|---|---|
-| `trend_break`      | `level_shift_z > 2`    | `(mean_second_half − mean_first_half) / σ_first` |
-| `variance_explode` | `variance_ratio > 2`   | `std(tail) / std(head)` |
-| `outlier_burst`    | `max_outlier_z > 4`    | `max|x − μ| / σ` |
-| `normal`           | baseline = 1.0 | (兜底) |
+| `ADAPTTS_PLANNER` | `bandit`/`bayesian`/`prior_aware` | 选 router |
+| `ADAPTTS_DECIDE` | `argmax`/`thompson`/`risk_min`/`auto` | 决策模式（auto=M1）|
+| `ADAPTTS_ALLOW_REMOTE` | 0/1 | 远程模型纳入候选 |
+| `ADAPTTS_CLF_PLANNER` | `bayesian`/unset | TSC Bayesian 路径 |
+| `CLF_MEM_K`/`CLF_MEM_K_MIN` | int | TSC memory 检索 K |
 
-logits softmax → 归一化概率。`strength` 默认 1.5，由 **M3 Empirical Bayes** 自动学习（与 NPrior 同管道）。
+---
 
-### 8.3 与 method2 子系统的复用
+## 10. feedback 11 条硬伤 · 解决状态回顾（vs 之前版本）
 
-| Round 6 子系统 | M7 复用方式 |
+> feedback 列 5 条理论 + 6 条工程硬伤。下表是 **method3(Round 7-8) 相对 method2(Round 5-6) 的封堵进度**。
+
+| # | feedback 硬伤 | method2 状态 | method3 改动 | 现状 |
+|---|---|---|---|---|
+| 理-1 | "贝叶斯"名不符实（factor 非生成式）| claim "Bayesian posterior" | **M8.1** 改 energy-based / belief-state framing | ✅ **已封堵**（framing 诚实化）|
+| 理-2 | factor explosion / 黑盒不可识别 | 6 factor 无审计工具 | **M8.2** Factor Attribution（LOFO+KL+冗余矩阵），重构误差 0 | ✅ **已封堵**（工具就位；当前无冗余对）|
+| 理-3 | Regime 根基不牢（静态 manifold，purity 82.4%）| k-means 硬聚类 + RegimePrior 直接当先验 | B3 `refit_regimes` 漂移时重训；但仍硬聚类 | ⚠️ **部分**（drift 重训有了，regime→feature 仍 open=P1 #75）|
+| 理-4 | Thompson 太浅（单高斯假设脆弱，重尾低估）| 全局高斯共轭 | **M1** meta-bandit + **M4** per-regime decay 提升自适应 | ⚠️ **部分**（自适应↑，但仍单高斯=P1 #74 robust bandit open）|
+| 理-5 | 缺 world model（不理解环境动力学）| 无 | 未做 | ❌ **未动**（P3 #83 future work）|
+| 工-4 | 复杂度爆炸缺性能证据 | 堆模块无诚实 ablation | M9 诚实评估 + M8 attribution 标 inert factor | ⚠️ **部分**（诚实数已出；逐 factor 减法=P1 #73 open）|
+| 工-5 | scheduler/router 开销未分析 | 无 Pareto | `latency_analysis.py` + Appendix C2(28-118×) | ⚠️ **部分**（有数；精度/耗时 Pareto=P2 #79 open）|
+| 工-6 | **记忆层泄漏（"致命"）** | 投票用 test-acc + self-membership | **M9** CV-only 投票 + leave-one-cell-out | ✅ **完全封堵**（−0.62pp 本轮复现，F-R8.7）|
+| 工-7 | 校正/漂移自洽性陷阱 | calibration↔drift 可能互相喂噪声 | drift 软属性 setattr 不破坏 save/load；冷启动回退=P2 #80 | ⚠️ **部分** |
+
+**总结**：method3 **完全封堵 3 条**（理-1 framing / 理-2 attribution / 工-6 memory 泄漏，即 feedback 最强调的"撤回 fake-Bayes + 修致命泄漏"），**部分缓解 5 条**，**1 条未动**（world model）。下一步主攻 P1 #73-76（robust bandit / regime-as-feature / factor 消融与权重学习），见 `TODO.md`。
+
+---
+
+## 11. 实测 → finish3.md
+
+Round 7-8 全部实测 + Findings **F-R7.1~7.4 / F-R8.1~8.9** 在 `finish3.md`：
+- §0 M1 meta-bandit / M4 per-regime decay · §1 M2 culling · §2 M3 EB · §3 M2+M3 walk-forward
+- §5 M7 anomaly · §7 **M8 Factor Attribution**（F-R8.5/8.6）· §8 **M9 泄漏诚实对比**（F-R8.7/8.8/8.9，逐-cell 表）
+
+> **本轮新增**：重跑 `taskb_router_v3_honest_sweep.py` 复现 honest **86.91% / −0.62pp**（routing rocket15/moment10/euclid4/dtw1），与 finish3 §8 完全一致 → 论文撤回"击败 Rocket"有实测背书。
+
+---
+
+## 12. 文件地图（Round 7-8 增量，全图见 method2 §12）
+
+```
+research/agent/
+├── bayesian_router.py     # 核心：energy belief + 6-8 priors + 3 likelihoods + M8 attribution
+├── meta_bandit.py         # M1 decide-mode meta-bandit
+├── model_culling.py       # M2 cull_models + EliminationPrior
+├── prior_learning.py      # M3 learn_prior_strengths (Empirical Bayes)
+├── bandit.py              # M4 per-regime decay (扩 BanditState)
+├── anomaly.py             # M7 Phase 1: AnomalyTypePrior + 2 detectors
+├── clf_memory.py          # M9 去泄漏: votable_accs()/cv_accs + LOCO exclude_meta
+├── clf_planner.py         # M9: 传 dataset/seed 构 exclude_meta
+├── drift_engine.py        # B3: 5 signals→3 actions→refit (M4 联动)
+├── adaptive_planner.py    # 自演化闭环: observe 周期触发 M2/M3/B3
+└── representation.py      # Layer1: embedding + RegimeAssigner
+research/experiments/
+├── build_clf_memory_v2.py        # M9: CV-based memory bank (test 仅 audit)
+└── taskb_router_v3_honest_sweep.py  # M9 诚实 sweep → results/taskb_router_v3_honest_ucr.jsonl
+```
+
+---
+
+## 术语表（method3 增量）
+
+| 缩写 | 含义 |
 |---|---|
-| B2 Calibration       | `AnomalyResult.score` 可直接作 raw_conf 喂进 `ConfidenceCalibrator.calibrate()` |
-| B3 Drift Engine      | 检测到的 fault_type 序列可注入 `state.telemetry.ctx_summary` 让 drift 跟踪 fault distribution 漂移 |
-| E1 Action Layer      | `is_anomaly=True` + calibrated_conf → 已有 5-tier 介入决策无缝接 |
-| R6-E Scheduler       | 多个 detector = 多个 candidate；scheduler.utility 同样可计算（accuracy_gain 改成 detection_gain）|
-| M2 Culling           | 长期表现差的 detector 自动淘汰 |
-| M3 EB                | `AnomalyTypePrior.strength` 与 `detector_strength[*]` 由 EB 自适应 |
-
-Phase 1 不需要新机制 —— 全部沿用 Round 5/6/7 已有基础设施。这印证 feedback §5 "核心还是尽量少引入新组件"。
-
-### 8.4 Phase 2 / 3 预留接口
-
-- Phase 2 · per-fault Memory：复用 `failure_memory.py` 的 `FailureCase`，按 `fault_type` 而非 `model` 分桶
-- Phase 3 · LLM RCA agent：可关闭模块，输入 `(window, AnomalyResult)`，输出 natural-language 根因 + 推荐 intervention
+| belief state | $b(M)=\mathrm{softmax}(-E)$，弱化版"posterior"（M8 后正名）|
+| LOFO | Leave-One-Factor-Out（M8 单次决策归因）|
+| LOCO | Leave-One-Cell-Out（M9 检索剔除自身）|
+| EB | Empirical Bayes（M3 自学 strength）|
+| F-R8.7 | 去泄漏后 TSC router −0.62pp（不再击败 Rocket）|
+| TSH | TSFM Saturation Hypothesis（Cov→1 ⇒ E[Δ]→0）|
 
 ---
 
-## 10. M8 · Factor Attribution + Bayesian framing 修正（feedback 问题 1+2）
-
-> feedback 两条理论硬伤：**问题 1** "你的 posterior 还不是真 posterior"（factor 非生成式、非条件独立，不该 claim exact Bayesian）；**问题 2** "factor explosion 已经开始失控"（everything becomes a factor → unidentifiable / 黑盒），并 **强烈建议新增 Factor Attribution Analysis**。M8 同时封堵这两条，且**不新增任何运行时模块**（符合 feedback "收敛 abstraction，不要继续堆模块"）。
-
-### 10.1 Framing 修正（问题 1）
-
-`bayesian_router.py` 模块 docstring 显式声明：本系统是 **factorized posterior-inspired energy model**（`p_k = softmax(−E_k)`, `E_k = −Σ_i w_i f_i(x)`），不是 exact Bayesian inference。论文/method 文本用 "Bayesian-style compositional decision model" / "energy-based routing"，**不**写 "exact Bayesian posterior"。`BayesianRouter` 类名保留仅为兼容。
-
-### 10.2 Factor Attribution Analysis（问题 2）
-
-新增三个**纯分析**工具（无状态、不改路由行为）：
-
-| 接口 | 回答的问题 | 方法 |
-|---|---|---|
-| `BayesianRouter.factor_log_contributions(ctx, ev)` | 每个 factor 给每个候选贡献了多少 log-term | 拆开 `log_posterior` 的加和项；label 去重 (`name` / `name#1`)；Σ 重构 log_posterior 误差 = 0 |
-| `attribute_decision(router, ctx, ev)` | **本次**决策里谁是决定性 factor | Leave-One-Factor-Out (LOFO)：去掉 factor 后 argmax 是否翻转 + KL(full‖without) + Δmargin(chosen−runner) |
-| `FactorAttributionAccumulator` | **跨**决策里哪两个 factor 在重复表达 | 收集每次 centred log-term 向量（softmax 平移不变 → 只看 centred），跨决策 concat 求 Pearson；`mean_abs_influence` 标出 inert factor |
-
-**硬 mask 处理**：`AvailabilityPrior` 用 ±1e6 是约束非偏好，会数值上淹没软 factor。`FactorAttributionAccumulator.clip=50.0` 把 centred 贡献裁到 log-space 饱和界，使软/硬 factor 在同一可读量纲对比。
-
-### 10.3 实测 → `finish3.md` §7（F-R8.5）
-
----
-
-## 11. M9 · 分类 Memory 数据泄漏修复（feedback 问题 6 · "致命 gap"）
-
-> feedback 把 `clf_memory` 列为唯一"致命"工程硬伤：存储 / 检索用的是 **测试集 acc**（`all_clf_accs` 来自 sweep 的 `r["acc"]`），部署时测试标签不可得 → router 用了未来信息；且 memory bank 与评测集是同 30 个 cell，存在 **self-membership** 泄漏（查询 cell 自身 case 以 sim≈1 排第一回灌自己的 outcome）。任何 memory 增益都不可复现。
-
-### 11.1 两类泄漏 + 修复
-
-| 泄漏 | 旧行为 | 修复 |
-|---|---|---|
-| **(A) value 泄漏** | 投票权重 `1/(1-test_acc)`；`best_classifier`=test-winner | 改为训练集内 **CV** 估计：`cv_accs` 是唯一可投票字段，`best_classifier`=CV-winner；`test_acc`/`all_clf_accs` 降级为 **AUDIT ONLY**，决策代码不可读 |
-| **(B) self-membership** | query 不排除自身 | `query/query_diverse/memory_consensus` 加 `exclude_meta`，按 `{dataset,N_per_class,seed}` **leave-one-cell-out** 剔除查询 cell |
-
-### 11.2 实现（无新模块，改既有边界）
-
-- `clf_memory.py`：`ClfCase` 加 `votable_accs()`（只返 `cv_accs`）+ `is_leaky()`；`_eligible()` 实现 LOCO；`consensus_winner_inv_loss` 改用 `votable_accs()`，legacy 无 cv 的 case **跳过**而非回退 test acc（回退=重新泄漏）。
-- `bayesian_router.py`：`MemoryLikelihood` 读 `cv_accs`；`Evidence.memory_neighbors` 注明禁止传 test acc。
-- `clf_planner.py`：按 `dataset/seed/n_classes` 构 `exclude_meta` 串进两条 memory 路径，neighbor dict 传 `cv_accs`。
-- `experiments/build_clf_memory_v2.py`：每 cell 用 `loo_cv_acc` 现算 CV → `cv_accs` + CV-winner；test 仅作 audit。
-
-### 11.3 实测 → `finish3.md` §8（诚实 vs 泄漏数字对比）
-
----
-
-## 9. 文件地图（Round 7-8 增量）
-
-```
-research/
-├── method3.md                  # 本文件（Round 7 方法）
-├── finish3.md                  # Round 7 实测
-├── agent/
-│   ├── meta_bandit.py          # M1: Meta-bandit on decide_mode (Round 8)
-│   ├── model_culling.py        # M2: cull_models + EliminationPrior
-│   ├── prior_learning.py       # M3: learn_prior_strengths (Empirical Bayes)
-│   └── anomaly.py              # M7 Phase 1: AnomalyTypePrior + 2 detectors
-└── experiments/
-    └── (TBD Round 7 demos)
-```
+**End of method3.md** — 后续 P1（robust bandit / regime-as-feature / factor 消融）落地后追加 §13+。

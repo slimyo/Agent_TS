@@ -16,7 +16,7 @@ def _get_pipeline(horizon_len: int):
         import timesfm
         _TFM = timesfm.TimesFm(
             hparams=timesfm.TimesFmHparams(
-                backend="cpu", per_core_batch_size=1,
+                backend=__import__("os").environ.get("TIMESFM_BACKEND","gpu"), per_core_batch_size=8,
                 horizon_len=horizon_len,
                 context_len=512, num_layers=50,
             ),

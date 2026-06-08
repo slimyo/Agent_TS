@@ -121,7 +121,7 @@ Blocked: TabPFN-TS (license)、KairosHope (repo 未公开)。
 
 ### 2.4 远程 GPU 基础设施
 
-- SSH: `c220@192.168.1.102` (2× RTX 5070 Ti 16GB, sm_120 Blackwell, CUDA 12.8)
+- SSH: `c220@10.192.43.66` (2× RTX 5070 Ti 16GB, sm_120 Blackwell, CUDA 12.8)
 - Workdir: `/data2/c220/hz/agent_ts/`
 - HF cache: `/data2/c220/hz/hf_cache/`（用 `HF_ENDPOINT=https://hf-mirror.com` 国内镜像）
 - 远程 conda envs (cloned from `TimeSeries_env`)：
@@ -129,7 +129,7 @@ Blocked: TabPFN-TS (license)、KairosHope (repo 未公开)。
   - `tsci-remote-tx440`: transformers **4.40.1** (Time-MoE/Sundial — `past_key_values.seen_tokens` API 旧依赖)
 - 启动模板：
   ```bash
-  ssh c220@192.168.1.102 'source ~/anaconda3/etc/profile.d/conda.sh && \
+  ssh c220@10.192.43.66 'source ~/anaconda3/etc/profile.d/conda.sh && \
      conda activate <env> && HF_HOME=/data2/c220/hz/hf_cache \
      HF_ENDPOINT=https://hf-mirror.com PYTHONPATH=/data2/c220/hz/agent_ts \
      python -m research.scripts.remote_sweep <model>'

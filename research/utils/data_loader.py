@@ -38,11 +38,16 @@ REGISTRY: dict[str, SeriesMeta] = {
     "Weather":  SeriesMeta("Weather",  "10min", 144, "OT"),
     # ILI（national_illness）：966 行周采样，目标列 OT，年季节性 m=52
     "ILI":      SeriesMeta("ILI",      "W", 52, "OT"),
+    # ETTm1/ETTm2：15min 采样 ETT，日季节性 m = 24*4 = 96（数据集扩充，2026-06-05）
+    "ETTm1":    SeriesMeta("ETTm1",    "15min", 96, "OT"),
+    "ETTm2":    SeriesMeta("ETTm2",    "15min", 96, "OT"),
 }
 
 URLS: dict[str, str] = {
     "ETTh1": "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv",
     "ETTh2": "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh2.csv",
+    "ETTm1": "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm1.csv",
+    "ETTm2": "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm2.csv",
     "ECL":      "https://raw.githubusercontent.com/laiguokun/multivariate-time-series-data/master/electricity/electricity.txt.gz",
     "Exchange": "https://raw.githubusercontent.com/laiguokun/multivariate-time-series-data/master/exchange_rate/exchange_rate.txt.gz",
     # Weather / ILI 走人工放置（公共镜像失效，2026-05 手动从 M4_ILI_Weather.zip 解压）

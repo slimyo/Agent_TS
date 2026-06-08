@@ -388,13 +388,13 @@ classification_planner(..., use_memory=True, use_enhanced_features=True,
 | `tsci` (local) | 3.10 | 2.x cu118 | 4.45+ | 主 env (8/12 forecasting + 11/11 TSC) |
 | `tsci-py312` (local) | 3.12 | 2.5+ | <4.46 | moirai2 / toto2 (uni2ts 2.0 兼容) |
 | `tsci-tx440` (local, deprecated) | 3.10 | 2.x | 4.40.1 | (旧) time_moe / sundial 回归 |
-| `tsci-remote` (`c220@192.168.1.102`) | 3.9 | 2.8.0+cu128 | **4.57.1** | Timer-S1 (Blackwell GPU) |
+| `tsci-remote` (`c220@10.192.43.66`) | 3.9 | 2.8.0+cu128 | **4.57.1** | Timer-S1 (Blackwell GPU) |
 | `tsci-remote-tx440` (远程) | 3.9 | 2.8.0+cu128 | **4.40.1** | time_moe / sundial (旧 API) |
 
 ### 10.2 远程 SSH
 
 ```bash
-ssh c220@192.168.1.102        # 2× RTX 5070 Ti, 16GB each, sm_120
+ssh c220@10.192.43.66        # 2× RTX 5070 Ti, 16GB each, sm_120
 密码: cinter
 workdir: /data2/c220/hz/agent_ts/
 HF cache: /data2/c220/hz/hf_cache/ + HF_ENDPOINT=https://hf-mirror.com
@@ -524,16 +524,16 @@ chosen, y_pred, trace = classification_planner(
 # 本地：rsync 代码 + cells
 sshpass -p cinter rsync -az research/scripts/remote_sweep.py \
     research/results/gated_residual_cells.jsonl \
-    c220@192.168.1.102:/data2/c220/hz/agent_ts/research/...
+    c220@10.192.43.66:/data2/c220/hz/agent_ts/research/...
 
 # 远程：跑 sweep
-ssh c220@192.168.1.102 'source ~/anaconda3/etc/profile.d/conda.sh \
+ssh c220@10.192.43.66 'source ~/anaconda3/etc/profile.d/conda.sh \
     && conda activate tsci-remote-tx440 \
     && HF_HOME=/data2/c220/hz/hf_cache HF_ENDPOINT=https://hf-mirror.com \
     && cd /data2/c220/hz/agent_ts && python research/scripts/remote_sweep.py time_moe'
 
 # 拉回结果
-sshpass -p cinter rsync -az c220@192.168.1.102:/data2/c220/hz/agent_ts/research/results/time_moe_vs_c2.jsonl \
+sshpass -p cinter rsync -az c220@10.192.43.66:/data2/c220/hz/agent_ts/research/results/time_moe_vs_c2.jsonl \
     research/results/
 ```
 

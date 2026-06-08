@@ -108,6 +108,71 @@ def _mantis_lr(X_train, y_train, X_test, **_):
     return classify_logreg(X_train, y_train, X_test)
 
 
+# ---------- 扩展库（baseline.md 末尾「可扩展分类模型」四类） ---------- #
+# 类别一：经典 SOTA 卷积核/区间（sktime, 本地）
+def _multirocket(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import multirocket
+    return multirocket(X_train, y_train, X_test, **kw)
+
+
+def _arsenal(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import arsenal
+    return arsenal(X_train, y_train, X_test, **kw)
+
+
+def _drcif(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import drcif
+    return drcif(X_train, y_train, X_test, **kw)
+
+
+# 类别二：深度网（纯 torch, 本地）
+def _fcn(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_deep import fcn
+    return fcn(X_train, y_train, X_test, **kw)
+
+
+def _resnet(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_deep import resnet
+    return resnet(X_train, y_train, X_test, **kw)
+
+
+def _inceptiontime(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_deep import inceptiontime
+    return inceptiontime(X_train, y_train, X_test, **kw)
+
+
+# 类别三：TSFM 嵌入 + 线性探头（大权重 → 远程 env，见 baseline.md §4.2）
+def _chronos2_emb(X_train, y_train, X_test, **kw):
+    from research.baseline.tsfm_embed import chronos2_emb
+    return chronos2_emb(X_train, y_train, X_test, **kw)
+
+
+def _timesfm_emb(X_train, y_train, X_test, **kw):
+    from research.baseline.tsfm_embed import timesfm_emb
+    return timesfm_emb(X_train, y_train, X_test, **kw)
+
+
+def _timer_emb(X_train, y_train, X_test, **kw):
+    from research.baseline.tsfm_embed import timer_emb
+    return timer_emb(X_train, y_train, X_test, **kw)
+
+
+# 类别四：原生多变量（sktime, 输入 [N,C,L]，本地）
+def _muse(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import muse
+    return muse(X_train, y_train, X_test, **kw)
+
+
+def _rocket_mv(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import rocket_mv
+    return rocket_mv(X_train, y_train, X_test, **kw)
+
+
+def _cif_mv(X_train, y_train, X_test, **kw):
+    from research.baseline.tsc_extended import cif_mv
+    return cif_mv(X_train, y_train, X_test, **kw)
+
+
 # ---------- 统一策略池 ---------- #
 
 CLF_STRATEGY_FN: dict[str, Callable] = {
@@ -122,6 +187,19 @@ CLF_STRATEGY_FN: dict[str, Callable] = {
     "catch22":       _safe(_catch22),
     "mantis_1nn":    _safe(_mantis_1nn),
     "mantis_lr":     _safe(_mantis_lr),
+    # --- 扩展库（四类）---
+    "multirocket":   _safe(_multirocket),   # 一·卷积核
+    "arsenal":       _safe(_arsenal),       # 一·卷积核集成
+    "drcif":         _safe(_drcif),         # 一·区间森林
+    "fcn":           _safe(_fcn),           # 二·深度
+    "resnet":        _safe(_resnet),        # 二·深度
+    "inceptiontime": _safe(_inceptiontime), # 二·深度
+    "chronos2_emb":  _safe(_chronos2_emb),  # 三·TSFM 嵌入(远程)
+    "timesfm_emb":   _safe(_timesfm_emb),   # 三·TSFM 嵌入(远程)
+    "timer_emb":     _safe(_timer_emb),     # 三·TSFM 嵌入(远程)
+    "muse":          _safe(_muse),          # 四·多变量
+    "rocket_mv":     _safe(_rocket_mv),     # 四·多变量
+    "cif_mv":        _safe(_cif_mv),        # 四·多变量
 }
 
 

@@ -349,10 +349,10 @@ $$c_k = \alpha \log(\mathrm{lat}) + \beta \log(\mathrm{params}) + \gamma \cdot \
 |---|---|---|---|---|
 | `tsci` (local main) | 3.10 | 2.x cu118 | 4.45+ | 8/12 forecasting + 11/11 TSC |
 | `tsci-py312` (local) | 3.12 | 2.5+ | <4.46 | moirai2 / toto2 |
-| `tsci-remote` (192.168.1.102) | 3.9 | 2.8.0+cu128 | **4.57.1** | Timer-S1 (Blackwell GPU) |
+| `tsci-remote` (10.192.43.66) | 3.9 | 2.8.0+cu128 | **4.57.1** | Timer-S1 (Blackwell GPU) |
 | `tsci-remote-tx440` (远程) | 3.9 | 2.8.0+cu128 | **4.40.1** | time_moe / sundial |
 
-远程 SSH: `c220@192.168.1.102` (2× RTX 5070 Ti 16GB)；HF cache `/data2/c220/hz/hf_cache/` + `HF_ENDPOINT=https://hf-mirror.com`。
+远程 SSH: `c220@10.192.43.66` (2× RTX 5070 Ti 16GB)；HF cache `/data2/c220/hz/hf_cache/` + `HF_ENDPOINT=https://hf-mirror.com`。
 
 ---
 
